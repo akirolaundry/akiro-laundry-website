@@ -2,6 +2,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { Geist }          from "next/font/google";
+import { Analytics }      from "@vercel/analytics/next";
 import { cn }             from "@/lib/utils";
 import { SessionProvider } from "@/components/shared/SessionProvider";
 import { Toaster }        from "@/components/ui/sonner";
@@ -94,6 +95,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       <body suppressHydrationWarning>
         <SessionProvider>{children}</SessionProvider>
         <Toaster position="bottom-right" richColors />
+        <Analytics />
       </body>
     </html>
   );
