@@ -243,6 +243,9 @@ export const expenseCategories = pgTable("expense_categories", {
   // Which side of the ledger this category applies to — controls which
   // categories the Buku Kecil entry form offers. "income" | "expense" | "both".
   kind:        text("kind").notNull().default("expense"),
+  // Admin switch: may staff pick this category when adding an expense on the
+  // employee Cash Register? Only meaningful for kind "expense" | "both".
+  employeeEnabled: boolean("employee_enabled").notNull().default(true),
   // No isActive — categories are hard-deleted. Past transactions retain categoryId
   // which resolves to null via ON DELETE SET NULL on the FK.
   createdAt:   timestamp("created_at").defaultNow().notNull(),

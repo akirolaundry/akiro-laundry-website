@@ -16,8 +16,9 @@ import type {
   CashRegisterTransaction,
   ExpenseCategory,
 } from "@/lib/db/schema";
-import { eq, desc, asc, gte, lt } from "drizzle-orm";
+import { eq, desc, asc, gte, lt, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
+import { auth } from "@/auth";
 import { startOfDayBiz } from "@/lib/utils/business-time";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -283,6 +284,58 @@ export async function recordManualTransaction(
   }
 }
 
+// ─── Employee: record an expense paid out of the drawer ──────────────────────
+
+export interface RecordEmployeeExpenseInput {
+  categoryId: number;
+  amount:     number;
+  /** Optional detail; the category name is used when left blank. */
+  note?:      string;
+}
+
+/**
+ * Staff-facing wrapper around recordManualTransaction: outflows only, the
+ * category must be one the admin has switched on for staff, and the drawer must
+ * actually hold the cash (the admin form silently floors the balance at 0).
+ */
+export async function recordEmployeeExpense(
+  input: RecordEmployeeExpenseInput,
+): Promise<RecordManualTransactionResult> {
+  const session = await auth();
+  const role    = (session?.user as { role?: string } | undefined)?.role;
+  if (role !== "employee" && role !== "admin") {
+    return { success: false, error: "You are not allowed to record expenses." };
+  }
+
+  const amount = Math.round(input.amount * 100) / 100;
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { success: false, error: "Amount must be greater than zero." };
+  }
+
+  const [category] = await db
+    .select()
+    .from(expenseCategories)
+    .where(eq(expenseCategories.id, input.categoryId))
+    .limit(1);
+  if (!category || !category.employeeEnabled || (category.kind !== "expense" && category.kind !== "both")) {
+    return { success: false, error: "That category is no longer available. Pick another one." };
+  }
+
+  const register = await getOrCreateRegister();
+  const balance  = parseFloat(register.balance);
+  if (amount > balance) {
+    return { success: false, error: `Not enough cash in the drawer (${balance.toFixed(2)} available).` };
+  }
+
+  const note = input.note?.trim();
+  return recordManualTransaction({
+    direction:   "outcome",
+    amount,
+    description: note ? `${category.name} — ${note}` : category.name,
+    categoryId:  category.id,
+  });
+}
+
 // ─── Process Payment (unchanged logic, adds direction field) ──────────────────
 
 export async function processPayment(
@@ -404,6 +457,13 @@ export async function processPayment(
 
 // ─── Expense Category CRUD ────────────────────────────────────────────────────
 
+function revalidateCategoryPages() {
+  revalidatePath("/admin/expense-categories");
+  revalidatePath("/admin/cash-register");
+  revalidatePath("/admin/buku-kecil");
+  revalidatePath("/employee/cash-register");
+}
+
 export async function getExpenseCategories(
   kind?: "income" | "expense",
 ): Promise<ExpenseCategory[]> {
@@ -412,11 +472,39 @@ export async function getExpenseCategories(
   return rows.filter((c) => c.kind === kind || c.kind === "both");
 }
 
+/** Categories staff may file an expense under: expense-side and switched on by an admin. */
+export async function getEmployeeExpenseCategories(): Promise<ExpenseCategory[]> {
+  const rows = await getExpenseCategories("expense");
+  return rows.filter((c) => c.employeeEnabled);
+}
+
+export type ExpenseCategoryWithUsage = ExpenseCategory & {
+  /** Ledger rows that used this category, and what they added up to. */
+  txCount:  number;
+  txTotal:  number;
+};
+
+/** Every category with how often it has been used — for the admin master-data page. */
+export async function getExpenseCategoriesWithUsage(): Promise<ExpenseCategoryWithUsage[]> {
+  const rows = await db
+    .select({
+      category: expenseCategories,
+      txCount:  sql<number>`count(${cashRegisterTransactions.id})::int`,
+      txTotal:  sql<string>`coalesce(sum(${cashRegisterTransactions.amount}), 0)`,
+    })
+    .from(expenseCategories)
+    .leftJoin(cashRegisterTransactions, eq(cashRegisterTransactions.categoryId, expenseCategories.id))
+    .groupBy(expenseCategories.id)
+    .orderBy(expenseCategories.name);
+  return rows.map((r) => ({ ...r.category, txCount: Number(r.txCount), txTotal: parseFloat(r.txTotal) }));
+}
+
 export async function createExpenseCategory(input: {
   name: string;
   description?: string;
   color?: string;
   kind?: "income" | "expense" | "both";
+  employeeEnabled?: boolean;
 }): Promise<{ success: boolean; category?: ExpenseCategory; error?: string }> {
   try {
     const [cat] = await db
@@ -426,10 +514,10 @@ export async function createExpenseCategory(input: {
         description: input.description?.trim() ?? null,
         color:       input.color ?? "#64748b",
         kind:        input.kind ?? "expense",
+        employeeEnabled: input.employeeEnabled ?? true,
       })
       .returning();
-    revalidatePath("/admin/cash-register");
-    revalidatePath("/admin/buku-kecil");
+    revalidateCategoryPages();
     return { success: true, category: cat };
   } catch (err: any) {
     if (err?.code === "23505")
@@ -440,22 +528,24 @@ export async function createExpenseCategory(input: {
 
 export async function updateExpenseCategory(
   id: number,
-  input: { name?: string; description?: string; color?: string; kind?: "income" | "expense" | "both" },
+  input: { name?: string; description?: string; color?: string; kind?: "income" | "expense" | "both"; employeeEnabled?: boolean },
 ): Promise<{ success: boolean; error?: string }> {
   try {
     await db
       .update(expenseCategories)
       .set({
         ...(input.name        && { name: input.name.trim() }),
-        ...(input.description !== undefined && { description: input.description }),
+        ...(input.description !== undefined && { description: input.description.trim() || null }),
         ...(input.color       && { color: input.color }),
         ...(input.kind        && { kind: input.kind }),
+        ...(input.employeeEnabled !== undefined && { employeeEnabled: input.employeeEnabled }),
       })
       .where(eq(expenseCategories.id, id));
-    revalidatePath("/admin/cash-register");
-    revalidatePath("/admin/buku-kecil");
+    revalidateCategoryPages();
     return { success: true };
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.code === "23505")
+      return { success: false, error: "A category with that name already exists." };
     return { success: false, error: "Failed to update category." };
   }
 }
@@ -467,7 +557,7 @@ export async function deleteExpenseCategory(
 ): Promise<{ success: boolean; error?: string }> {
   try {
     await db.delete(expenseCategories).where(eq(expenseCategories.id, id));
-    revalidatePath("/admin/cash-register");
+    revalidateCategoryPages();
     return { success: true };
   } catch (err) {
     return { success: false, error: "Failed to delete category." };

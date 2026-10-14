@@ -2,20 +2,14 @@
 // components/admin/CashRegisterAdmin.tsx  (full replacement)
 "use client";
 
-import { useState, useTransition, useRef } from "react";
+import { useState, useTransition } from "react";
+import Link from "next/link";
 import {
-  Wallet, TrendingUp, TrendingDown, Save, Loader2,
-  ArrowUpCircle, ArrowDownCircle, Plus, Trash2,
-  CreditCard, BarChart3, Clock, Tag, ChevronDown, X,
-  Pencil, Check,
+  Wallet, TrendingUp, TrendingDown, Loader2,
+  ArrowUpCircle, ArrowDownCircle,
+  CreditCard, BarChart3, Clock, Tags, ArrowUpRight,
 } from "lucide-react";
-import {
-  setCashRegisterBalance,
-  recordManualTransaction,
-  createExpenseCategory,
-  deleteExpenseCategory,
-  updateExpenseCategory,
-} from "@/lib/actions/payments";
+import { recordManualTransaction } from "@/lib/actions/payments";
 import { formatUSD } from "@/lib/utils/order-form";
 import type { CashRegisterState } from "@/lib/actions/payments";
 import type { RevenueStats } from "@/lib/actions/admin-orders";
@@ -28,14 +22,6 @@ interface Props {
   revenue:           RevenueStats;
   initialCategories: ExpenseCategory[];
 }
-
-// ─── Colour palette for category badges ──────────────────────────────────────
-
-const PALETTE = [
-  "#1a7fba", "#16a34a", "#d97706", "#e11d48",
-  "#7c3aed", "#0891b2", "#be185d", "#b45309",
-  "#4f46e5", "#059669",
-];
 
 // ─── Tiny helpers ─────────────────────────────────────────────────────────────
 
@@ -71,8 +57,9 @@ function SectionHeader({ label }: { label: string }) {
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export function CashRegisterAdmin({ initialState, revenue, initialCategories }: Props) {
-  const [state,      setState]      = useState(initialState);
-  const [categories, setCategories] = useState<ExpenseCategory[]>(initialCategories);
+  const [state, setState] = useState(initialState);
+  // Categories are managed on /admin/expense-categories; this page only reads them.
+  const categories = initialCategories;
 
   // ── Transaction form state ────────────────────────────────────────────────
   const [txDirection, setTxDirection] = useState<"income" | "outcome">("income");
@@ -81,17 +68,6 @@ export function CashRegisterAdmin({ initialState, revenue, initialCategories }: 
   const [txCategory,  setTxCategory]  = useState<number | null>(null);
   const [txFeedback,  setTxFeedback]  = useState<{ ok: boolean; msg: string } | null>(null);
   const [txPending,   startTx]        = useTransition();
-
-  // ── Category manager state ────────────────────────────────────────────────
-  const [catName,    setCatName]    = useState("");
-  const [catDesc,    setCatDesc]    = useState("");
-  const [catColor,   setCatColor]   = useState(PALETTE[0]);
-  const [catKind,    setCatKind]    = useState<"expense" | "income" | "both">("expense");
-  const [catFeedback,setCatFeedback]= useState<{ ok: boolean; msg: string } | null>(null);
-  const [catPending, startCat]      = useTransition();
-  const [editingId,  setEditingId]  = useState<number | null>(null);
-  const [editName,   setEditName]   = useState("");
-  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   // ─── Submit a manual transaction ────────────────────────────────────────
 
@@ -133,62 +109,6 @@ export function CashRegisterAdmin({ initialState, revenue, initialCategories }: 
     });
   };
 
-  // ─── Create category ─────────────────────────────────────────────────────
-
-  const handleCreateCategory = () => {
-    if (!catName.trim()) {
-      setCatFeedback({ ok: false, msg: "Category name is required." });
-      return;
-    }
-    setCatFeedback(null);
-    startCat(async () => {
-      const result = await createExpenseCategory({
-        name:        catName.trim(),
-        description: catDesc.trim() || undefined,
-        color:       catColor,
-        kind:        catKind,
-      });
-      if (result.success && result.category) {
-        setCategories((prev) => [...prev, result.category!].sort((a, b) => a.name.localeCompare(b.name)));
-        setCatFeedback({ ok: true, msg: `"${result.category.name}" created.` });
-        setCatName(""); setCatDesc(""); setCatColor(PALETTE[0]); setCatKind("expense");
-      } else {
-        setCatFeedback({ ok: false, msg: result.error ?? "Failed." });
-      }
-    });
-  };
-
-  // ─── Delete (soft) category ───────────────────────────────────────────────
-
-  const handleDeleteCategory = (id: number, name: string) => {
-    if (!confirm(`Delete "${name}"? This cannot be undone. Past transactions that used this category will show it as removed.`)) return;
-    setDeletingId(id);
-    startCat(async () => {
-      const result = await deleteExpenseCategory(id);
-      if (result.success) {
-        setCategories((prev) => prev.filter((c) => c.id !== id));
-        if (txCategory === id) setTxCategory(null);
-      }
-      setDeletingId(null);
-    });
-  };
-
-  // ─── Inline rename category ───────────────────────────────────────────────
-
-  const handleRename = (id: number) => {
-    if (!editName.trim()) { setEditingId(null); return; }
-    startCat(async () => {
-      const result = await updateExpenseCategory(id, { name: editName.trim() });
-      if (result.success) {
-        setCategories((prev) =>
-          prev.map((c) => c.id === id ? { ...c, name: editName.trim() } : c)
-            .sort((a, b) => a.name.localeCompare(b.name)),
-        );
-      }
-      setEditingId(null);
-    });
-  };
-
   // ─── Revenue cards ────────────────────────────────────────────────────────
 
   const revenueCards = [
@@ -200,7 +120,8 @@ export function CashRegisterAdmin({ initialState, revenue, initialCategories }: 
 
   // ─────────────────────────────────────────────────────────────────────────
 
-  const activeCategories = categories;
+  // Expenses are filed under expense-side categories only.
+  const activeCategories = categories.filter((c) => c.kind === "expense" || c.kind === "both");
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
@@ -341,7 +262,7 @@ export function CashRegisterAdmin({ initialState, revenue, initialCategories }: 
                   </label>
                   {activeCategories.length === 0 ? (
                     <p style={{ fontSize: "12px", color: "#f59e0b", padding: "8px 12px", background: "#fffbeb", borderRadius: "8px", border: "1px solid #fcd34d" }}>
-                      No categories yet — create one below first.
+                      No expense categories yet — add one on the Expense Categories page.
                     </p>
                   ) : (
                     <select
@@ -464,181 +385,26 @@ export function CashRegisterAdmin({ initialState, revenue, initialCategories }: 
             </div>
           </div>
 
-          {/* ─ Expense Categories ─────────────────────────────────────────── */}
-          <div style={{
-            background: "white", borderRadius: "12px",
-            border: "1.5px solid #e2e8f0",
-            boxShadow: "0 1px 6px rgba(0,0,0,0.04)", overflow: "hidden",
-          }}>
-            <SectionHeader label="Expense Categories" />
-
-            <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "10px" }}>
-
-              {/* Existing categories */}
-              {activeCategories.length === 0 ? (
-                <p style={{ fontSize: "12px", color: "#94a3b8", textAlign: "center", padding: "12px 0" }}>
-                  No categories yet.
-                </p>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                  {activeCategories.map((cat) => (
-                    <div key={cat.id} style={{
-                      display: "flex", alignItems: "center", gap: "10px",
-                      padding: "8px 10px", borderRadius: "8px",
-                      border: "1.5px solid #f1f5f9", background: "#fafafa",
-                    }}>
-                      <span style={{
-                        width: 10, height: 10, borderRadius: "50%",
-                        background: cat.color ?? "#64748b", flexShrink: 0,
-                      }} />
-
-                      {editingId === cat.id ? (
-                        <>
-                          <input
-                            autoFocus
-                            value={editName}
-                            onChange={(e) => setEditName(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === "Enter") handleRename(cat.id); if (e.key === "Escape") setEditingId(null); }}
-                            style={{
-                              flex: 1, padding: "3px 8px", border: "1.5px solid #b6def5",
-                              borderRadius: "5px", fontSize: "12px", outline: "none",
-                            }}
-                          />
-                          <button onClick={() => handleRename(cat.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#16a34a", padding: 2 }}>
-                            <Check size={14} />
-                          </button>
-                          <button onClick={() => setEditingId(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#94a3b8", padding: 2 }}>
-                            <X size={13} />
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <span style={{ flex: 1, fontSize: "12px", fontWeight: 600, color: "#1e293b", display: "flex", alignItems: "center", gap: "6px" }}>
-                            {cat.name}
-                            {cat.kind !== "expense" && (
-                              <span style={{ fontSize: "9px", fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: "4px", padding: "1px 5px" }}>
-                                {cat.kind}
-                              </span>
-                            )}
-                          </span>
-                          <button
-                            onClick={() => { setEditingId(cat.id); setEditName(cat.name); }}
-                            title="Rename"
-                            style={{ background: "none", border: "none", cursor: "pointer", color: "#94a3b8", padding: 2 }}
-                          >
-                            <Pencil size={12} />
-                          </button>
-                          <button
-                            onClick={() => handleDeleteCategory(cat.id, cat.name)}
-                            disabled={deletingId === cat.id}
-                            title="Remove"
-                            style={{ background: "none", border: "none", cursor: "pointer", color: "#fda4af", padding: 2 }}
-                          >
-                            {deletingId === cat.id ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Add new category */}
-              <div style={{
-                marginTop: "4px", padding: "14px",
-                borderRadius: "10px",
-                background: "linear-gradient(135deg,#f8fafc,#f1f5f9)",
-                border: "1.5px dashed #cbd5e1",
-                display: "flex", flexDirection: "column", gap: "10px",
-              }}>
-                <p style={{ fontSize: "10px", fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.1em" }}>
-                  New Category
-                </p>
-
-                <input
-                  type="text"
-                  value={catName}
-                  onChange={(e) => setCatName(e.target.value)}
-                  placeholder="e.g. Store Improvement, Supplies…"
-                  style={{
-                    width: "100%", boxSizing: "border-box",
-                    padding: "8px 12px", border: "1.5px solid #e2e8f0",
-                    borderRadius: "7px", fontSize: "13px", color: "#1e293b", outline: "none", background: "white",
-                  }}
-                  onFocus={(e) => { e.currentTarget.style.borderColor = "#b6def5"; }}
-                  onBlur={(e)  => { e.currentTarget.style.borderColor = "#e2e8f0"; }}
-                />
-
-                {/* Applies to (kind) — drives which categories the Buku Kecil form offers */}
-                <div>
-                  <p style={{ fontSize: "10px", fontWeight: 700, color: "#94a3b8", marginBottom: "6px" }}>Applies to</p>
-                  <div style={{ display: "flex", gap: "6px" }}>
-                    {([
-                      { v: "expense" as const, label: "Expense" },
-                      { v: "income"  as const, label: "Income"  },
-                      { v: "both"    as const, label: "Both"    },
-                    ]).map((o) => {
-                      const active = catKind === o.v;
-                      return (
-                        <button key={o.v} type="button" onClick={() => setCatKind(o.v)} style={{
-                          flex: 1, padding: "6px 4px", borderRadius: "7px",
-                          border: `1.5px solid ${active ? "#1a7fba" : "#e2e8f0"}`,
-                          background: active ? "#edf7fd" : "white",
-                          color: active ? "#1a7fba" : "#64748b",
-                          fontSize: "11px", fontWeight: 700, cursor: "pointer",
-                        }}>{o.label}</button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Colour picker */}
-                <div>
-                  <p style={{ fontSize: "10px", fontWeight: 700, color: "#94a3b8", marginBottom: "6px" }}>Colour</p>
-                  <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                    {PALETTE.map((hex) => (
-                      <button
-                        key={hex}
-                        onClick={() => setCatColor(hex)}
-                        style={{
-                          width: 22, height: 22, borderRadius: "50%",
-                          background: hex, border: `2.5px solid ${catColor === hex ? "#1e293b" : "transparent"}`,
-                          cursor: "pointer", boxShadow: catColor === hex ? "0 0 0 1.5px white inset" : "none",
-                        }}
-                      />
-                    ))}
-                  </div>
-                </div>
-
-                {catFeedback && (
-                  <p style={{
-                    fontSize: "11px", fontWeight: 600, padding: "6px 10px", borderRadius: "6px",
-                    background: catFeedback.ok ? "#f0fdf4" : "#fff1f2",
-                    color: catFeedback.ok ? "#14532d" : "#be123c",
-                    border: `1px solid ${catFeedback.ok ? "#86efac" : "#fda4af"}`,
-                  }}>
-                    {catFeedback.msg}
-                  </p>
-                )}
-
-                <button
-                  onClick={handleCreateCategory}
-                  disabled={catPending}
-                  style={{
-                    height: 36, borderRadius: "7px", border: "none",
-                    background: catPending ? "#94a3b8" : "linear-gradient(135deg,#1a7fba,#2496d6 55%,#0f5a85)",
-                    color: "white", fontSize: "12px", fontWeight: 800,
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
-                    cursor: catPending ? "not-allowed" : "pointer",
-                    opacity: catPending ? 0.6 : 1,
-                  }}
-                >
-                  {catPending ? <Loader2 size={12} className="animate-spin" /> : <Plus size={13} />}
-                  Add Category
-                </button>
-              </div>
-            </div>
-          </div>
+          {/* ─ Expense Categories → master data page ─────────────────────── */}
+          <Link
+            href="/admin/expense-categories"
+            style={{
+              display: "flex", alignItems: "center", gap: "12px", padding: "14px 16px",
+              background: "white", borderRadius: "12px", border: "1.5px solid #e2e8f0",
+              boxShadow: "0 1px 6px rgba(0,0,0,0.04)", textDecoration: "none",
+            }}
+          >
+            <span style={{ width: 36, height: 36, flexShrink: 0, borderRadius: "9px", background: "#edf7fd", border: "1.5px solid #b6def5", display: "flex", alignItems: "center", justifyContent: "center", color: "#1a7fba" }}>
+              <Tags size={16} />
+            </span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: "block", fontSize: "13px", fontWeight: 800, color: "#0f172a" }}>Expense categories</span>
+              <span style={{ display: "block", fontSize: "11px", color: "#94a3b8", marginTop: "1px" }}>
+                {categories.length} categor{categories.length === 1 ? "y" : "ies"} · add, edit and choose what employees can use
+              </span>
+            </span>
+            <ArrowUpRight size={16} style={{ color: "#94a3b8", flexShrink: 0 }} />
+          </Link>
         </div>
 
         {/* ── Transaction ledger ─────────────────────────────────────────── */}
@@ -668,7 +434,7 @@ export function CashRegisterAdmin({ initialState, revenue, initialCategories }: 
                 const isChangeOut = tx.type === "change_out";
                 const catName     = (tx as any).categoryName as string | null;
                 const catColor    = catName
-                  ? (activeCategories.find((c) => c.name === catName)?.color ?? "#64748b")
+                  ? (categories.find((c) => c.name === catName)?.color ?? "#64748b")
                   : "#64748b";
 
                 // income = green · change returned to customer = amber · other outflow = red

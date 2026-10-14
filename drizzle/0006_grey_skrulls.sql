@@ -1,0 +1,1 @@
+ALTER TABLE "expense_categories" ADD COLUMN "employee_enabled" boolean DEFAULT true NOT NULL;

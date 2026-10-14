@@ -1,13 +1,14 @@
 // components/employee/CashRegisterClient.tsx
-// Employee cash register (view only): the live drawer balance with today's
-// balance trail, today's money in / out, and every recent movement grouped by
-// day. Adjustments stay admin-only (components/admin/CashRegisterAdmin.tsx).
+// Employee cash register: the live drawer balance with today's balance trail,
+// today's money in / out, and every recent movement grouped by day. Staff can
+// add expenses (admin-managed categories); balance adjustments stay admin-only
+// (components/admin/CashRegisterAdmin.tsx).
 "use client";
 
 import { useEffect, useId, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
-  type LucideIcon, Activity, ArrowDownLeft, ArrowUpRight, Coins, Lock, Plus, Receipt,
+  type LucideIcon, Activity, ArrowDownLeft, ArrowUpRight, CheckCircle2, Coins, Lock, Plus, Receipt,
   RefreshCw, SlidersHorizontal, TrendingDown, TrendingUp, Wallet,
 } from "lucide-react";
 import { formatUSD } from "@/lib/utils/order-form";
@@ -15,7 +16,9 @@ import {
   formatBiz, formatDateTimeBiz, formatDayLabelBiz, isoDayBiz, timeAgoShort,
 } from "@/lib/utils/business-time";
 import { AutoRefresh } from "@/components/employee/AutoRefresh";
+import { ExpenseModal } from "@/components/employee/ExpenseModal";
 import type { CashDrawerToday, CashRegisterState } from "@/lib/actions/payments";
+import type { ExpenseCategory } from "@/lib/db/schema";
 
 type Tx     = CashRegisterState["recentTransactions"][number];
 type Filter = "all" | "in" | "out";
@@ -77,13 +80,23 @@ interface Props {
   today: CashDrawerToday;
   /** Server render time (ISO) — for "Today / 5m ago" labels. */
   now:   string;
+  /** Admin-managed categories staff can file an expense under. */
+  categories: ExpenseCategory[];
 }
 
-export function CashRegisterClient({ state, today, now }: Props) {
+export function CashRegisterClient({ state, today, now, categories }: Props) {
   const router  = useRouter();
   const nowDate = new Date(now);
   const [isRefreshing, startRefresh] = useTransition();
   const [filter, setFilter] = useState<Filter>("all");
+  const [addingExpense, setAddingExpense] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 5000);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   const { balance, lastUpdatedAt, recentTransactions } = state;
   const opening = today.openingBalance ?? balance;
@@ -123,9 +136,13 @@ export function CashRegisterClient({ state, today, now }: Props) {
           <p className="mt-0.5 text-sm font-semibold text-slate-500">Live drawer balance and every cash movement</p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="inline-flex h-10 items-center gap-1.5 rounded-full bg-slate-100 px-3.5 text-[12px] font-bold text-slate-500">
-            <Lock size={13} /> View only
-          </span>
+          <button
+            type="button"
+            onClick={() => setAddingExpense(true)}
+            className="inline-flex h-10 items-center gap-1.5 rounded-full bg-rose-600 px-4 text-[13px] font-extrabold text-white shadow-md shadow-rose-600/20 transition hover:bg-rose-700 active:scale-95"
+          >
+            <Plus size={15} strokeWidth={3} /> Add expense
+          </button>
           <button
             type="button"
             onClick={() => startRefresh(() => router.refresh())}
@@ -136,6 +153,12 @@ export function CashRegisterClient({ state, today, now }: Props) {
           </button>
         </div>
       </div>
+
+      {notice && (
+        <p role="status" className="flex items-center gap-2 rounded-2xl bg-emerald-50 px-4 py-3 text-[13px] font-bold text-emerald-700 ring-1 ring-emerald-100">
+          <CheckCircle2 size={16} className="shrink-0" /> {notice}
+        </p>
+      )}
 
       <div className="grid items-start gap-5 min-[900px]:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
         {/* ── Left: balance + today ────────────────────────────────────
@@ -214,7 +237,7 @@ export function CashRegisterClient({ state, today, now }: Props) {
 
           <p className="flex items-center gap-2 px-1 text-xs font-semibold text-slate-400">
             <Lock size={12} className="shrink-0" />
-            Cash register adjustments and expenses are recorded by admins only.
+            Balance adjustments are made by admins only.
           </p>
         </div>
 
@@ -274,6 +297,19 @@ export function CashRegisterClient({ state, today, now }: Props) {
           )}
         </section>
       </div>
+
+      {addingExpense && (
+        <ExpenseModal
+          categories={categories}
+          balance={balance}
+          onClose={() => setAddingExpense(false)}
+          onSaved={(message) => {
+            setAddingExpense(false);
+            setNotice(message);
+            router.refresh();
+          }}
+        />
+      )}
     </div>
   );
 }

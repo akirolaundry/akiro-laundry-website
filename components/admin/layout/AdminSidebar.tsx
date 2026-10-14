@@ -36,6 +36,7 @@ import {
   Send,
   Search,
   Receipt,
+  Tags,
 } from "lucide-react";
 
 // ─── Nav groups ───────────────────────────────────────────────────────────────
@@ -81,9 +82,15 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    label: "Master Data",
+    items: [
+      { href: "/admin/expense-categories", icon: Tags, label: "Expense Categories" },
+    ],
+  },
+  {
     label: "Content",
     items: [
-      { href: "/admin/cms",                  icon: Layers,        label: "CMS Overview"  },
+      { href: "/admin/cms",                icon: Layers,        label: "CMS Overview"  },
       { href: "/admin/cms/navbar",           icon: Navigation,    label: "Navbar"        },
       { href: "/admin/cms/hero",             icon: LayoutTemplate,label: "Hero"          },
       { href: "/admin/cms/services",         icon: Wrench,        label: "Services"      },

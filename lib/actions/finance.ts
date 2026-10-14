@@ -48,7 +48,11 @@ interface RawTx {
   categoryName: string | null;
   categoryColor: string | null;
   orderNumber: string | null;
+  customerId: number | null;
   customerName: string | null;
+  customerPhone: string | null;
+  orderTotal: string | null;
+  orderPaymentStatus: string | null;
   /** Change subtracted from this payment_in by netChangeOut(), if any. */
   changeNetted?: number;
 }
@@ -110,7 +114,11 @@ async function fetchTransactions(fromISO: string, toISO: string): Promise<RawTx[
       categoryName:  expenseCategories.name,
       categoryColor: expenseCategories.color,
       orderNumber:   orders.orderNumber,
+      customerId:    customers.id,
       customerName:  customers.name,
+      customerPhone: customers.phone,
+      orderTotal:    orders.totalPrice,
+      orderPaymentStatus: orders.paymentStatus,
     })
     .from(cashRegisterTransactions)
     .leftJoin(expenseCategories, eq(cashRegisterTransactions.categoryId, expenseCategories.id))
@@ -185,6 +193,51 @@ function netChangeOut(txs: RawTx[]): RawTx[] {
     });
 }
 
+// ─── Payment type (full / DP / balance) ───────────────────────────────────────
+// A payment that completes an order which already had an earlier payment (a DP,
+// or a balance reopened by an edit) is the "final" one. Each order's first
+// payment is looked up across all history — the order total can't tell, since
+// paid orders can be edited. Expects the netted transactions, oldest first.
+
+type PaymentType = "full" | "dp" | "balance";
+
+async function resolvePaymentTypes(txs: RawTx[]): Promise<Map<number, PaymentType>> {
+  const paidOrderIds = [...new Set(
+    txs.filter((t) => t.type === "payment_in" && t.orderId != null).map((t) => t.orderId!),
+  )];
+  const firstPayments = paidOrderIds.length === 0 ? [] : await db
+    .select({
+      orderId: cashRegisterTransactions.orderId,
+      firstId: sql<number>`min(${cashRegisterTransactions.id})`,
+    })
+    .from(cashRegisterTransactions)
+    .where(and(
+      eq(cashRegisterTransactions.type, "payment_in"),
+      inArray(cashRegisterTransactions.orderId, paidOrderIds),
+    ))
+    .groupBy(cashRegisterTransactions.orderId);
+  const firstPaymentId = new Map(firstPayments.map((r) => [r.orderId!, Number(r.firstId)]));
+  // Rows detached from a deleted order can only be matched within the period.
+  const seenDetached = new Set<string>();
+
+  const result = new Map<number, PaymentType>();
+  for (const t of txs) {
+    if (t.type !== "payment_in") continue;
+    let hadEarlierPayment: boolean;
+    if (t.orderId != null) {
+      hadEarlierPayment = (firstPaymentId.get(t.orderId) ?? t.id) < t.id;
+    } else {
+      const key = orderKey(t);
+      hadEarlierPayment = key != null && seenDetached.has(key);
+      if (key != null) seenDetached.add(key);
+    }
+    result.set(t.id, t.description.startsWith("Partial payment") ? "dp"
+      : hadEarlierPayment ? "balance"
+      : "full");
+  }
+  return result;
+}
+
 // ─── Ledger (Buku Kecil) ──────────────────────────────────────────────────────
 
 export interface LedgerEntry {
@@ -199,10 +252,24 @@ export interface LedgerEntry {
   credit: number;  // money in
   balanceAfter: number;
   type: string;
+  /** Order payments only: paid in one go, a DP, or the final payment after an earlier one. */
+  paymentType: PaymentType | null;
+  orderId: number | null;
+  orderNumber: string | null;
+  customerId: number | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  /** Current order total / payment status (not as of the transaction). */
+  orderTotal: number | null;
+  orderPaymentStatus: string | null;
+  /** Cash handed over and change returned — set only when change was given back. */
+  tendered: number | null;
+  change: number | null;
 }
 
 export async function getLedger(fromISO: string, toISO: string): Promise<LedgerEntry[]> {
-  const txs = netChangeOut(await fetchTransactions(fromISO, toISO));
+  const txs   = netChangeOut(await fetchTransactions(fromISO, toISO));
+  const types = await resolvePaymentTypes(txs);
   return txs.map((tx) => {
     const meta   = classify(tx);
     const amount = parseFloat(tx.amount);
@@ -218,6 +285,18 @@ export async function getLedger(fromISO: string, toISO: string): Promise<LedgerE
       credit:        tx.direction === "income"  ? amount : 0,
       balanceAfter:  parseFloat(tx.balanceAfter),
       type:          tx.type,
+      paymentType:   types.get(tx.id) ?? null,
+      orderId:       tx.orderId,
+      // Deleting an order detaches its ledger rows — fall back to the order
+      // number written into the description.
+      orderNumber:   tx.orderNumber ?? tx.description.match(/for order (\S+)/)?.[1] ?? null,
+      customerId:    tx.customerId,
+      customerName:  tx.customerName,
+      customerPhone: tx.customerPhone,
+      orderTotal:    tx.orderTotal != null ? parseFloat(tx.orderTotal) : null,
+      orderPaymentStatus: tx.orderPaymentStatus,
+      tendered:      tx.changeNetted ? r2(amount + tx.changeNetted) : null,
+      change:        tx.changeNetted ? r2(tx.changeNetted) : null,
     };
   });
 }
@@ -313,47 +392,13 @@ export async function getCashBook(fromISO: string, toISO: string): Promise<CashB
   ]);
   const openingBalance = prev ? parseFloat(prev.balanceAfter) : 0;
 
-  // A payment that completes an order which already had an earlier payment (a
-  // DP, or a balance reopened by an edit) is the "final" one. Look up each
-  // order's first payment across all history — the order total can't tell,
-  // since paid orders can be edited.
-  const paidOrderIds = [...new Set(
-    raw.filter((t) => t.type === "payment_in" && t.orderId != null).map((t) => t.orderId!),
-  )];
-  const firstPayments = paidOrderIds.length === 0 ? [] : await db
-    .select({
-      orderId: cashRegisterTransactions.orderId,
-      firstId: sql<number>`min(${cashRegisterTransactions.id})`,
-    })
-    .from(cashRegisterTransactions)
-    .where(and(
-      eq(cashRegisterTransactions.type, "payment_in"),
-      inArray(cashRegisterTransactions.orderId, paidOrderIds),
-    ))
-    .groupBy(cashRegisterTransactions.orderId);
-  const firstPaymentId = new Map(firstPayments.map((r) => [r.orderId!, Number(r.firstId)]));
-  // Rows detached from a deleted order can only be matched within the period.
-  const seenDetached = new Set<string>();
+  const netted       = netChangeOut(raw);
+  const paymentTypes = await resolvePaymentTypes(netted);
 
-  const entries: CashBookEntry[] = netChangeOut(raw).map((t) => {
+  const entries: CashBookEntry[] = netted.map((t) => {
     const meta   = classify(t);
     const amount = parseFloat(t.amount);
     const kind   = cashBookKind(t.type);
-
-    let paymentType: CashBookEntry["paymentType"] = null;
-    if (kind === "payment") {
-      let hadEarlierPayment: boolean;
-      if (t.orderId != null) {
-        hadEarlierPayment = (firstPaymentId.get(t.orderId) ?? t.id) < t.id;
-      } else {
-        const key = orderKey(t);
-        hadEarlierPayment = key != null && seenDetached.has(key);
-        if (key != null) seenDetached.add(key);
-      }
-      paymentType = t.description.startsWith("Partial payment") ? "dp"
-        : hadEarlierPayment ? "balance"
-        : "full";
-    }
 
     return {
       id:            t.id,
@@ -361,7 +406,7 @@ export async function getCashBook(fromISO: string, toISO: string): Promise<CashB
       day:           isoDayBiz(t.createdAt),
       direction:     t.direction,
       kind,
-      paymentType,
+      paymentType:   kind === "payment" ? (paymentTypes.get(t.id) ?? null) : null,
       amount,
       tendered:      t.changeNetted ? r2(amount + t.changeNetted) : null,
       change:        t.changeNetted ? r2(t.changeNetted) : null,
