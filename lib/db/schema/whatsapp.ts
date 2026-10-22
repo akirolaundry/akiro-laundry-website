@@ -201,6 +201,30 @@ export const waPromoRecipients = pgTable("wa_promo_recipients", {
   sentAt: timestamp("sent_at"),
 });
 
+// ─── WhatsApp Promo Templates ────────────────────────────────────────────────
+// Saved message bodies the admin can reuse for future blasts. Placeholders
+// ({{firstName}} …) stay in the text and are filled per recipient at send time.
+
+export const waPromoTemplates = pgTable("wa_promo_templates", {
+  id: serial("id").primaryKey(),
+
+  // What the admin calls it in the picker ("Ramadan 20% off"). Unique, so
+  // saving under an existing name replaces that template.
+  name: text("name").notNull().unique(),
+
+  // Optional default campaign title for the history list.
+  title: text("title"),
+
+  // The raw message body, WITH {{placeholders}} still in it.
+  message: text("message").notNull(),
+
+  // Email of the admin who saved it (from the auth session).
+  createdBy: text("created_by"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 // ─── Exported Types ───────────────────────────────────────────────────────────
 
 export type WaTemplateSettings    = typeof waTemplateSettings.$inferSelect;
@@ -211,3 +235,5 @@ export type WaPromoCampaign       = typeof waPromoCampaigns.$inferSelect;
 export type NewWaPromoCampaign    = typeof waPromoCampaigns.$inferInsert;
 export type WaPromoRecipient      = typeof waPromoRecipients.$inferSelect;
 export type NewWaPromoRecipient   = typeof waPromoRecipients.$inferInsert;
+export type WaPromoTemplate       = typeof waPromoTemplates.$inferSelect;
+export type NewWaPromoTemplate    = typeof waPromoTemplates.$inferInsert;

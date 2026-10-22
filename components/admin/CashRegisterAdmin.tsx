@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { recordManualTransaction } from "@/lib/actions/payments";
 import { formatUSD } from "@/lib/utils/order-form";
+import { formatDayLabelBiz, isoDayBiz } from "@/lib/utils/business-time";
 import type { CashRegisterState } from "@/lib/actions/payments";
 import type { RevenueStats } from "@/lib/actions/admin-orders";
 import type { ExpenseCategory } from "@/lib/db/schema";
@@ -66,6 +67,9 @@ export function CashRegisterAdmin({ initialState, revenue, initialCategories }: 
   const [txAmount,    setTxAmount]    = useState("");
   const [txDesc,      setTxDesc]      = useState("");
   const [txCategory,  setTxCategory]  = useState<number | null>(null);
+  // Day the money moved — today unless the entry is being logged late.
+  const [today]                       = useState(() => isoDayBiz(new Date()));
+  const [txDate,      setTxDate]      = useState(today);
   const [txFeedback,  setTxFeedback]  = useState<{ ok: boolean; msg: string } | null>(null);
   const [txPending,   startTx]        = useTransition();
 
@@ -85,6 +89,10 @@ export function CashRegisterAdmin({ initialState, revenue, initialCategories }: 
       setTxFeedback({ ok: false, msg: "Select an expense category." });
       return;
     }
+    if (!txDate || txDate > today) {
+      setTxFeedback({ ok: false, msg: txDate ? "The date can't be in the future." : "Pick the date." });
+      return;
+    }
     setTxFeedback(null);
     startTx(async () => {
       const result = await recordManualTransaction({
@@ -92,6 +100,7 @@ export function CashRegisterAdmin({ initialState, revenue, initialCategories }: 
         amount,
         description: txDesc.trim(),
         categoryId:  txDirection === "outcome" ? txCategory : null,
+        date:        txDate,
       });
       if (result.success && result.newBalance !== undefined) {
         setState((prev) => ({
@@ -99,7 +108,10 @@ export function CashRegisterAdmin({ initialState, revenue, initialCategories }: 
           balance:       result.newBalance!,
           lastUpdatedAt: new Date(),
         }));
-        setTxFeedback({ ok: true, msg: `Recorded! New balance: ${formatUSD(result.newBalance!)}` });
+        setTxFeedback({
+          ok: true,
+          msg: `Recorded${txDate === today ? "" : ` on ${formatDayLabelBiz(txDate)}`}! New balance: ${formatUSD(result.newBalance!)}`,
+        });
         setTxAmount("");
         setTxDesc("");
         setTxCategory(null);
@@ -302,6 +314,31 @@ export function CashRegisterAdmin({ initialState, revenue, initialCategories }: 
                   onFocus={(e)  => { e.currentTarget.style.borderColor = "#b6def5"; }}
                   onBlur={(e)   => { e.currentTarget.style.borderColor = "#e2e8f0"; }}
                 />
+              </div>
+
+              {/* Date */}
+              <div>
+                <label style={{ display: "block", fontSize: "10px", fontWeight: 800, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: "6px" }}>
+                  {txDirection === "income" ? "Date received" : "Date spent"}
+                </label>
+                <input
+                  type="date"
+                  value={txDate}
+                  max={today}
+                  onChange={(e) => setTxDate(e.target.value)}
+                  style={{
+                    width: "100%", boxSizing: "border-box",
+                    padding: "10px 14px", border: "1.5px solid #e2e8f0", borderRadius: "8px",
+                    fontSize: "13px", color: "#1e293b", outline: "none",
+                  }}
+                  onFocus={(e)  => { e.currentTarget.style.borderColor = "#b6def5"; }}
+                  onBlur={(e)   => { e.currentTarget.style.borderColor = "#e2e8f0"; }}
+                />
+                {txDate && txDate !== today && (
+                  <p style={{ fontSize: "11px", fontWeight: 600, color: "#d97706", marginTop: "6px" }}>
+                    Booked on {formatDayLabelBiz(txDate)} — the balance from that day on will include it.
+                  </p>
+                )}
               </div>
 
               {/* Description */}

@@ -16,10 +16,12 @@ import type {
   CashRegisterTransaction,
   ExpenseCategory,
 } from "@/lib/db/schema";
-import { eq, desc, asc, gte, lt, sql } from "drizzle-orm";
+import { eq, desc, asc, gt, gte, lt, lte, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { auth } from "@/auth";
-import { startOfDayBiz } from "@/lib/utils/business-time";
+import {
+  bizDayAtTimeOf, isISODay, isoDayBiz, startOfDayBiz,
+} from "@/lib/utils/business-time";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -68,6 +70,11 @@ export interface RecordManualTransactionInput {
   description: string;
   /** Required when direction === "outcome"; optional for income. */
   categoryId?: number | null;
+  /**
+   * Business-local day (YYYY-MM-DD) the money actually moved. Defaults to today;
+   * a future day is rejected. A past day books the entry on that day.
+   */
+  date?: string;
 }
 
 export interface RecordManualTransactionResult {
@@ -233,6 +240,16 @@ export async function setCashRegisterBalance(
 
 // ─── NEW: Record a manual income or expense transaction ───────────────────────
 
+function revalidateLedgerPages() {
+  revalidatePath("/admin/buku-kecil");
+  revalidatePath("/admin/buku-besar");
+
+  revalidatePath("/admin/cash-register");
+  revalidatePath("/admin/daily-cash");
+  revalidatePath("/employee/cash-register");
+  revalidatePath("/admin");
+}
+
 export async function recordManualTransaction(
   input: RecordManualTransactionInput,
 ): Promise<RecordManualTransactionResult> {
@@ -247,6 +264,17 @@ export async function recordManualTransaction(
     // legacy Cash Register income form working.
     if (direction === "outcome" && !categoryId) {
       return { success: false, error: "Please select a category for expense entries." };
+    }
+
+    const now   = new Date();
+    const today = isoDayBiz(now);
+    const date  = input.date?.trim() || today;
+    if (!isISODay(date)) return { success: false, error: "Pick a valid date." };
+    if (date > today)    return { success: false, error: "The date can't be in the future." };
+    if (date < today) {
+      return insertBackdatedTransaction({
+        direction, amount, description: description.trim(), categoryId: categoryId ?? null, date, now,
+      });
     }
 
     const register      = await getOrCreateRegister();
@@ -270,18 +298,88 @@ export async function recordManualTransaction(
       balanceAfter: newBalance.toFixed(2),
     });
 
-    revalidatePath("/admin/buku-kecil");
-    revalidatePath("/admin/buku-besar");
-
-    revalidatePath("/admin/cash-register");
-    revalidatePath("/admin/daily-cash");
-    revalidatePath("/employee/cash-register");
-    revalidatePath("/admin");
+    revalidateLedgerPages();
     return { success: true, newBalance };
   } catch (err) {
     console.error("[recordManualTransaction]", err);
     return { success: false, error: "Failed to record transaction." };
   }
+}
+
+/**
+ * Books a manual entry on an earlier day. `balance_after` is a running total, so
+ * the entry is slotted into the ledger at that day (same clock time as now) and
+ * every later row's balance moves by the same amount — Daily Cash openings and
+ * the Buku Kecil balance column then stay consistent, with no drift. The three
+ * writes go out as one batch so a failure can't leave the chain half-updated.
+ */
+async function insertBackdatedTransaction(e: {
+  direction:   "income" | "outcome";
+  amount:      number;
+  description: string;
+  categoryId:  number | null;
+  date:        string;
+  now:         Date;
+}): Promise<RecordManualTransactionResult> {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+
+  const register       = await getOrCreateRegister();
+  const currentBalance = parseFloat(register.balance);
+  const signed         = e.direction === "income" ? e.amount : -e.amount;
+  if (e.direction === "outcome" && e.amount > currentBalance) {
+    return {
+      success: false,
+      error: `Not enough cash in the drawer (${currentBalance.toFixed(2)} available).`,
+    };
+  }
+
+  // Nothing before the first record: the opening balance there is unknown.
+  const [first] = await db
+    .select({ createdAt: cashRegisterTransactions.createdAt })
+    .from(cashRegisterTransactions)
+    .orderBy(asc(cashRegisterTransactions.createdAt), asc(cashRegisterTransactions.id))
+    .limit(1);
+  if (first && e.date < isoDayBiz(first.createdAt)) {
+    return {
+      success: false,
+      error: `The cash register has no records before ${isoDayBiz(first.createdAt)} — pick that day or later.`,
+    };
+  }
+  let at = bizDayAtTimeOf(e.date, e.now);
+  if (first && at < first.createdAt) at = first.createdAt; // first day: sort right after it
+
+  // The new row sorts after every row up to `at` (ties go to the lower id).
+  const [prior] = await db
+    .select({ balanceAfter: cashRegisterTransactions.balanceAfter })
+    .from(cashRegisterTransactions)
+    .where(lte(cashRegisterTransactions.createdAt, at))
+    .orderBy(desc(cashRegisterTransactions.createdAt), desc(cashRegisterTransactions.id))
+    .limit(1);
+  const priorBalance = prior ? parseFloat(prior.balanceAfter) : 0;
+  const newBalance   = r2(currentBalance + signed);
+
+  await db.batch([
+    db
+      .update(cashRegisterTransactions)
+      .set({ balanceAfter: sql`${cashRegisterTransactions.balanceAfter} + (${signed.toFixed(2)})::numeric` })
+      .where(gt(cashRegisterTransactions.createdAt, at)),
+    db
+      .update(cashRegister)
+      .set({ balance: newBalance.toFixed(2), lastUpdatedAt: new Date() })
+      .where(eq(cashRegister.id, register.id)),
+    db.insert(cashRegisterTransactions).values({
+      direction:    e.direction,
+      amount:       e.amount.toFixed(2),
+      type:         e.direction === "income" ? "manual_income" : "manual_outcome",
+      categoryId:   e.categoryId,
+      description:  e.description,
+      balanceAfter: r2(priorBalance + signed).toFixed(2),
+      createdAt:    at,
+    }),
+  ]);
+
+  revalidateLedgerPages();
+  return { success: true, newBalance };
 }
 
 // ─── Employee: record an expense paid out of the drawer ──────────────────────
@@ -291,6 +389,8 @@ export interface RecordEmployeeExpenseInput {
   amount:     number;
   /** Optional detail; the category name is used when left blank. */
   note?:      string;
+  /** Business-local day (YYYY-MM-DD) the money was spent; defaults to today. */
+  date?:      string;
 }
 
 /**
@@ -333,6 +433,7 @@ export async function recordEmployeeExpense(
     amount,
     description: note ? `${category.name} — ${note}` : category.name,
     categoryId:  category.id,
+    date:        input.date,
   });
 }
 

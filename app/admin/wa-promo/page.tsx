@@ -4,6 +4,7 @@ import { auth } from "@/lib/auth";
 import {
   getPromoRecipients,
   getPromoCampaigns,
+  getPromoTemplates,
 } from "@/lib/actions/wa-promo";
 import { getWaProvider } from "@/lib/utils/wa-send";
 import { getWaTemplateSettings } from "@/lib/actions/wa-templates";
@@ -20,9 +21,10 @@ export default async function WaPromoPage() {
   if ((session.user as { role?: string }).role !== "admin") redirect("/dashboard");
 
   // ── Data ─────────────────────────────────────────────────────────────────
-  const [recipients, campaigns, settings] = await Promise.all([
+  const [recipients, campaigns, templates, settings] = await Promise.all([
     getPromoRecipients(),
     getPromoCampaigns(),
+    getPromoTemplates(),
     getWaTemplateSettings(),
   ]);
 
@@ -44,6 +46,7 @@ export default async function WaPromoPage() {
       <WaPromoClient
         recipients={recipients}
         campaigns={campaigns}
+        templates={templates}
         provider={getWaProvider()}
         business={{
           name:  settings?.businessName  ?? "Akiro Laundry",

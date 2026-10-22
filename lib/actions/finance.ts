@@ -8,6 +8,7 @@ import {
 import { and, asc, desc, eq, gte, inArray, lt, lte, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { addDaysISO, bizDayEnd, bizDayStart, isoDayBiz } from "@/lib/utils/business-time";
+import { paymentBalance } from "@/lib/utils/order-payment";
 
 // ─── Category-key model ───────────────────────────────────────────────────────
 // Every ledger transaction resolves to a stable string key. Keys are used by the
@@ -480,6 +481,155 @@ export async function getCashBook(fromISO: string, toISO: string): Promise<CashB
     outCount,
     drift:          r2(recordedEnd - closingBalance),
     entries,
+    days,
+  };
+}
+
+// ─── Order book (Daily Cash page, "by order date") ────────────────────────────
+// The other way to read revenue: every order on the day it was PLACED, at its
+// full price, whatever the payment method — instead of the cash book's "money
+// that went through the drawer on the day it arrived". `collected` is what has
+// been received against those orders so far (on any later day too), so
+// collected + outstanding = value.
+
+export type OrderBookMethod = "cash" | "transfer" | "qris" | "other";
+
+export interface OrderBookOrder {
+  id:            number;
+  orderNumber:   string;
+  createdAt:     Date;
+  /** Business-local day the order was placed, YYYY-MM-DD. */
+  day:           string;
+  customerName:  string | null;
+  paymentStatus: "unpaid" | "partial" | "paid";
+  /** Method of the most recent payment — null while nothing is paid. */
+  method:        OrderBookMethod | null;
+  total:         number;
+  collected:     number;
+  outstanding:   number;
+  /** Day the order was settled, when that wasn't the day it was placed. */
+  paidDay:       string | null;
+}
+
+export interface OrderBookDay {
+  day:         string;
+  orders:      number;
+  value:       number;
+  collected:   number;
+  outstanding: number;
+}
+
+export interface OrderBook {
+  orderCount:    number;
+  value:         number;
+  collected:     number;
+  outstanding:   number;
+  unpaidCount:   number;
+  partialCount:  number;
+  paidCount:     number;
+  /** Still owed on orders with nothing paid yet / on part-paid orders. */
+  unpaidDue:     number;
+  partialDue:    number;
+  byMethod:      { method: OrderBookMethod; amount: number; count: number }[];
+  orders:        OrderBookOrder[];
+  days:          OrderBookDay[];
+}
+
+export async function getOrderBook(fromISO: string, toISO: string): Promise<OrderBook> {
+  const rows = await db
+    .select({
+      id:                   orders.id,
+      orderNumber:          orders.orderNumber,
+      createdAt:            orders.createdAt,
+      totalPrice:           orders.totalPrice,
+      paymentStatus:        orders.paymentStatus,
+      paymentMethod:        orders.paymentMethod,
+      amountPaid:           orders.amountPaid,
+      paidAt:               orders.paidAt,
+      editedAfterPaymentAt: orders.editedAfterPaymentAt,
+      customerName:         customers.name,
+    })
+    .from(orders)
+    .leftJoin(customers, eq(orders.customerId, customers.id))
+    .where(and(
+      gte(orders.createdAt, bizDayStart(fromISO)),
+      lte(orders.createdAt, bizDayEnd(toISO)),
+    ))
+    .orderBy(asc(orders.createdAt), asc(orders.id));
+
+  const byDay    = new Map<string, OrderBookDay>();
+  const byMethod = new Map<OrderBookMethod, { amount: number; count: number }>();
+  const list: OrderBookOrder[] = [];
+  let value = 0, collected = 0, outstanding = 0;
+  let unpaidCount = 0, partialCount = 0, paidCount = 0, unpaidDue = 0, partialDue = 0;
+
+  for (const o of rows) {
+    const total = parseFloat(o.totalPrice);
+    const { received, balanceDue } = paymentBalance({
+      totalPrice:           o.totalPrice,
+      paymentStatus:        o.paymentStatus,
+      amountPaid:           o.amountPaid,
+      paidAt:               o.paidAt,
+      editedAfterPaymentAt: o.editedAfterPaymentAt,
+    });
+    const got    = r2(Math.min(received, total)); // an overpayment isn't this order's revenue
+    const due    = r2(balanceDue);
+    const day    = isoDayBiz(o.createdAt);
+    const paidOn = o.paymentStatus === "paid" && o.paidAt ? isoDayBiz(o.paidAt) : null;
+    const method: OrderBookMethod | null = got > 0 ? (o.paymentMethod ?? "other") : null;
+
+    list.push({
+      id: o.id, orderNumber: o.orderNumber, createdAt: o.createdAt, day,
+      customerName:  o.customerName,
+      paymentStatus: o.paymentStatus,
+      method,
+      total, collected: got, outstanding: due,
+      paidDay: paidOn && paidOn !== day ? paidOn : null,
+    });
+
+    value += total; collected += got; outstanding += due;
+    if (o.paymentStatus === "paid")         paidCount++;
+    else if (o.paymentStatus === "partial") { partialCount++; partialDue += due; }
+    else                                    { unpaidCount++;  unpaidDue  += due; }
+    if (method) {
+      const m = byMethod.get(method) ?? { amount: 0, count: 0 };
+      m.amount += got; m.count++;
+      byMethod.set(method, m);
+    }
+
+    const d = byDay.get(day) ?? { day, orders: 0, value: 0, collected: 0, outstanding: 0 };
+    d.orders++; d.value += total; d.collected += got; d.outstanding += due;
+    byDay.set(day, d);
+  }
+
+  // Same rule as the cash book: short spans list every day up to today (quiet
+  // days included); long custom ranges only the days that had orders.
+  const today = isoDayBiz(new Date());
+  const last  = toISO < today ? toISO : today;
+  const span  = (Date.parse(`${last}T00:00:00Z`) - Date.parse(`${fromISO}T00:00:00Z`)) / 86_400_000 + 1;
+  let days: OrderBookDay[];
+  if (span <= FILL_DAYS_MAX) {
+    days = [];
+    for (let day = fromISO; day <= last; day = addDaysISO(day, 1)) {
+      days.push(byDay.get(day) ?? { day, orders: 0, value: 0, collected: 0, outstanding: 0 });
+    }
+  } else {
+    days = [...byDay.values()];
+  }
+  for (const d of days) { d.value = r2(d.value); d.collected = r2(d.collected); d.outstanding = r2(d.outstanding); }
+
+  const ORDER: OrderBookMethod[] = ["cash", "transfer", "qris", "other"];
+  return {
+    orderCount: list.length,
+    value:       r2(value),
+    collected:   r2(collected),
+    outstanding: r2(outstanding),
+    unpaidCount, partialCount, paidCount,
+    unpaidDue:   r2(unpaidDue),
+    partialDue:  r2(partialDue),
+    byMethod:    ORDER.filter((m) => byMethod.has(m))
+                      .map((m) => ({ method: m, amount: r2(byMethod.get(m)!.amount), count: byMethod.get(m)!.count })),
+    orders:      list,
     days,
   };
 }

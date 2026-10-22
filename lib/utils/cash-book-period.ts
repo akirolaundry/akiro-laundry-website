@@ -4,12 +4,20 @@
 // calendar math on YYYY-MM-DD strings in the shop's timezone (Asia/Dili), so the
 // server (UTC on Vercel) and the browser always agree on what "today" is.
 
-import { addDaysISO, isoDayBiz } from "@/lib/utils/business-time";
+import { addDaysISO, isISODay, isoDayBiz } from "@/lib/utils/business-time";
 
 export type CashBookView = "daily" | "weekly" | "monthly" | "custom";
 
+/**
+ * What the page counts as revenue:
+ *   cash   — money that went through the drawer, on the day it was received
+ *   orders — orders on the day they were placed, whatever the payment method
+ */
+export type CashBookBasis = "cash" | "orders";
+
 export interface CashBookPeriod {
   view:       CashBookView;
+  basis:      CashBookBasis;
   /** First day of the period, YYYY-MM-DD (inclusive). */
   from:       string;
   /** Last day of the period, YYYY-MM-DD (inclusive). */
@@ -24,19 +32,11 @@ export interface CashBookPeriod {
 }
 
 export interface CashBookSearchParams {
-  view?: string;
-  date?: string;
-  from?: string;
-  to?:   string;
-}
-
-const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-/** A real calendar date in YYYY-MM-DD form (rejects e.g. 2026-02-31). */
-function isISODate(s: unknown): s is string {
-  if (typeof s !== "string" || !ISO_RE.test(s)) return false;
-  const d = new Date(`${s}T00:00:00.000Z`);
-  return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(s);
+  view?:  string;
+  basis?: string;
+  date?:  string;
+  from?:  string;
+  to?:    string;
 }
 
 function fmt(iso: string, opts: Intl.DateTimeFormatOptions): string {
@@ -81,14 +81,15 @@ export function resolveCashBookPeriod(
   today: string = isoDayBiz(new Date()),
 ): CashBookPeriod {
   const { view: rawView, date, from: rawFrom, to: rawTo } = sp;
+  const basis: CashBookBasis = sp.basis === "orders" ? "orders" : "cash";
 
   // ── Custom range ──
-  if (rawView === "custom" && isISODate(rawFrom) && isISODate(rawTo)) {
+  if (rawView === "custom" && isISODay(rawFrom) && isISODay(rawTo)) {
     let [from, to] = rawFrom <= rawTo ? [rawFrom, rawTo] : [rawTo, rawFrom];
     if (to > today) to = today;
     if (from > to) from = to;
     return {
-      view: "custom", from, to,
+      view: "custom", basis, from, to,
       label:      cashBookRangeLabel(from, to),
       isCurrent:  to === today,
       prevAnchor: null,
@@ -98,7 +99,7 @@ export function resolveCashBookPeriod(
 
   // ── Daily / weekly / monthly, anchored on a date (default today) ──
   const view: CashBookView = rawView === "weekly" || rawView === "monthly" ? rawView : "daily";
-  const anchor = isISODate(date) && date <= today ? date : today;
+  const anchor = isISODay(date) && date <= today ? date : today;
 
   let from: string, to: string, prev: string, next: string, label: string;
   if (view === "weekly") {
@@ -122,7 +123,7 @@ export function resolveCashBookPeriod(
   }
 
   return {
-    view, from, to, label,
+    view, basis, from, to, label,
     isCurrent:  from <= today && today <= to,
     prevAnchor: prev,
     nextAnchor: next <= today ? next : null,
@@ -130,7 +131,9 @@ export function resolveCashBookPeriod(
 }
 
 /** URL of the Daily Cash page for a period — the URL is the single source of truth. */
-export function cashBookHref(p: { view: CashBookView; date?: string; from?: string; to?: string }): string {
+export function cashBookHref(p: {
+  view: CashBookView; basis?: CashBookBasis; date?: string; from?: string; to?: string;
+}): string {
   const qs = new URLSearchParams();
   if (p.view === "custom") {
     qs.set("view", "custom");
@@ -140,6 +143,7 @@ export function cashBookHref(p: { view: CashBookView; date?: string; from?: stri
     if (p.view !== "daily") qs.set("view", p.view);
     if (p.date) qs.set("date", p.date);
   }
+  if (p.basis === "orders") qs.set("basis", "orders");
   const s = qs.toString();
   return s ? `/admin/daily-cash?${s}` : "/admin/daily-cash";
 }

@@ -8,6 +8,7 @@ import {
   orders,
   waPromoCampaigns,
   waPromoRecipients,
+  waPromoTemplates,
 } from "@/lib/db/schema";
 import type { WaTemplateSettings } from "@/lib/db/schema/whatsapp";
 import { getWaTemplateSettings } from "@/lib/actions/wa-templates";
@@ -18,7 +19,7 @@ import {
   toWaNumber,
   waMeLink,
 } from "@/lib/utils/wa-send";
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 
 // Hard cap per blast — keeps the Fonnte send loop inside the serverless time
@@ -340,6 +341,110 @@ export async function sendPromoTest(
   );
   const res = await sendViaFonnte(toWaNumber(phone), text);
   return res.ok ? { success: true } : { success: false, error: res.error };
+}
+
+// ─── Saved templates ─────────────────────────────────────────────────────────
+// A template is just a named message (plus an optional campaign title) the admin
+// can load back into the composer. Placeholders are kept as typed.
+
+export interface PromoTemplateRow {
+  id:        number;
+  name:      string;
+  title:     string | null;
+  message:   string;
+  updatedAt: string;
+}
+
+const TEMPLATE_NAME_MAX = 60;
+
+function toTemplateRow(t: typeof waPromoTemplates.$inferSelect): PromoTemplateRow {
+  return {
+    id:        t.id,
+    name:      t.name,
+    title:     t.title,
+    message:   t.message,
+    updatedAt: new Date(t.updatedAt).toISOString(),
+  };
+}
+
+export async function getPromoTemplates(): Promise<PromoTemplateRow[]> {
+  try {
+    await requireAdmin();
+    const rows = await db
+      .select()
+      .from(waPromoTemplates)
+      .orderBy(desc(waPromoTemplates.updatedAt));
+    return rows.map(toTemplateRow);
+  } catch (err) {
+    // Also covers the table not existing yet (migration pending) — the composer
+    // still works, it just starts with no saved templates.
+    console.error("[getPromoTemplates]", err);
+    return [];
+  }
+}
+
+export async function savePromoTemplate(input: {
+  name:    string;
+  title?:  string;
+  message: string;
+}): Promise<{ success: boolean; error?: string; template?: PromoTemplateRow; replaced?: boolean }> {
+  let user: { email?: string | null } = {};
+  try {
+    user = await requireAdmin();
+  } catch {
+    return { success: false, error: "You must be signed in as an admin." };
+  }
+
+  const name    = input.name.trim().replace(/\s+/g, " ");
+  const message = input.message.trim();
+  const title   = input.title?.trim() || null;
+  if (!name)                          return { success: false, error: "Give the template a name." };
+  if (name.length > TEMPLATE_NAME_MAX) return { success: false, error: `Keep the name under ${TEMPLATE_NAME_MAX} characters.` };
+  if (!message)                       return { success: false, error: "Write a message before saving it as a template." };
+
+  try {
+    // Same name (ignoring case) → replace that template instead of adding a twin.
+    const [existing] = await db
+      .select({ id: waPromoTemplates.id })
+      .from(waPromoTemplates)
+      .where(sql`lower(${waPromoTemplates.name}) = lower(${name})`)
+      .limit(1);
+
+    const [row] = existing
+      ? await db
+          .update(waPromoTemplates)
+          .set({ name, title, message, updatedAt: new Date() })
+          .where(eq(waPromoTemplates.id, existing.id))
+          .returning()
+      : await db
+          .insert(waPromoTemplates)
+          .values({ name, title, message, createdBy: user.email ?? null })
+          .returning();
+
+    revalidatePath("/admin/wa-promo");
+    return { success: true, template: toTemplateRow(row), replaced: !!existing };
+  } catch (err) {
+    console.error("[savePromoTemplate]", err);
+    return { success: false, error: "Failed to save the template." };
+  }
+}
+
+export async function deletePromoTemplate(
+  id: number,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    await requireAdmin();
+  } catch {
+    return { success: false, error: "Not authorized." };
+  }
+  try {
+    await db.delete(waPromoTemplates).where(eq(waPromoTemplates.id, id));
+    revalidatePath("/admin/wa-promo");
+    return { success: true };
+  } catch (err) {
+    console.error("[deletePromoTemplate]", err);
+    return { success: false, error: "Failed to delete the template." };
+  }
 }
 
 // ─── History ─────────────────────────────────────────────────────────────────

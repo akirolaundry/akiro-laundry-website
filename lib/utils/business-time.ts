@@ -77,6 +77,22 @@ export function bizDayEnd(iso: string): Date {
   return new Date(bizDayStart(iso).getTime() + 86_400_000 - 1);
 }
 
+/** A real calendar date in YYYY-MM-DD form (rejects e.g. 2026-02-31). */
+export function isISODay(s: unknown): s is string {
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(`${s}T00:00:00.000Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(s);
+}
+
+/**
+ * The instant on business-local day `iso` at the same clock time as `now` — for
+ * back-dating a record: the day is the user's choice, the time stays natural.
+ */
+export function bizDayAtTimeOf(iso: string, now: Date = new Date()): Date {
+  const sinceMidnight = now.getTime() - startOfDayBiz(now).getTime();
+  return new Date(bizDayStart(iso).getTime() + sinceMidnight);
+}
+
 /** Pure calendar arithmetic on a YYYY-MM-DD string (no timezone involved). */
 export function addDaysISO(iso: string, n: number): string {
   const d = new Date(`${iso}T00:00:00.000Z`);

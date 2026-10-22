@@ -6,13 +6,14 @@ import { toast } from "sonner";
 import {
   MessageCircle, Send, Search, Users, X, Loader2, Download,
   CheckCircle2, AlertTriangle, ExternalLink, Copy, Trash2, Info,
-  Zap, Hand,
+  Zap, Hand, Bookmark, BookmarkPlus,
 } from "lucide-react";
 import { interpolate } from "@/lib/utils/wa-message";
 import { parseE164 } from "@/lib/utils/phone";
 import {
   createPromoBlast, markPromoSent, sendPromoTest, deletePromoCampaign,
-  type PromoRecipient, type PromoCampaignRow, type CreatePromoResult,
+  savePromoTemplate, deletePromoTemplate,
+  type PromoRecipient, type PromoCampaignRow, type CreatePromoResult, type PromoTemplateRow,
 } from "@/lib/actions/wa-promo";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -99,11 +100,12 @@ const ghostBtn: React.CSSProperties = {
 interface Props {
   recipients: PromoRecipient[];
   campaigns:  PromoCampaignRow[];
+  templates:  PromoTemplateRow[];
   provider:   "manual" | "fonnte";
   business:   { name: string; phone: string; url: string };
 }
 
-export function WaPromoClient({ recipients, campaigns, provider, business }: Props) {
+export function WaPromoClient({ recipients, campaigns, templates, provider, business }: Props) {
   const router = useRouter();
   const [isPending, start] = useTransition();
 
@@ -115,6 +117,12 @@ export function WaPromoClient({ recipients, campaigns, provider, business }: Pro
   const [confirm, setConfirm]   = useState(false);
   const [testPhone, setTestPhone] = useState(business.phone);
   const [manualResult, setManualResult] = useState<CreatePromoResult | null>(null);
+
+  // Saved templates: which one is loaded, plus the two "are you sure?" dialogs.
+  const [activeTemplateId, setActiveTemplateId] = useState<number | null>(null);
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [replacing, setReplacing] = useState<PromoTemplateRow | null>(null);
+  const [removing,  setRemoving]  = useState<PromoTemplateRow | null>(null);
 
   // ── Filtered audience ────────────────────────────────────────────────────
   // "now" captured once at mount so the memo stays pure across renders.
@@ -162,6 +170,50 @@ export function WaPromoClient({ recipients, campaigns, provider, business }: Pro
 
   const insertToken = (token: string) => setMessage((m) => (m ? `${m} ${token}` : token));
 
+  // ── Templates ────────────────────────────────────────────────────────────
+  const applyTemplate = (t: PromoTemplateRow) => {
+    setTitle(t.title ?? "");
+    setMessage(t.message);
+    setActiveTemplateId(t.id);
+    toast.success(`Loaded “${t.name}”.`);
+  };
+
+  // Don't silently overwrite something the admin has typed.
+  const useTemplate = (t: PromoTemplateRow) => {
+    const typed = message.trim();
+    if (typed && typed !== t.message.trim()) setReplacing(t);
+    else applyTemplate(t);
+  };
+
+  // Resolves true once saved, so the panel knows when to close its name field.
+  const saveTemplate = async (name: string): Promise<boolean> => {
+    setSavingTemplate(true);
+    const res = await savePromoTemplate({ name, title, message });
+    setSavingTemplate(false);
+    if (!res.success || !res.template) {
+      toast.error(res.error ?? "Failed to save the template.");
+      return false;
+    }
+    setActiveTemplateId(res.template.id);
+    toast.success(res.replaced ? `Updated “${res.template.name}”.` : `Saved “${res.template.name}”.`);
+    router.refresh();
+    return true;
+  };
+
+  const removeTemplate = (t: PromoTemplateRow) => {
+    setRemoving(null);
+    start(async () => {
+      const res = await deletePromoTemplate(t.id);
+      if (!res.success) {
+        toast.error(res.error ?? "Failed to delete the template.");
+        return;
+      }
+      if (activeTemplateId === t.id) setActiveTemplateId(null);
+      toast.success("Template deleted.");
+      router.refresh();
+    });
+  };
+
   // ── Actions ──────────────────────────────────────────────────────────────
   const doSend = () => {
     setConfirm(false);
@@ -183,6 +235,7 @@ export function WaPromoClient({ recipients, campaigns, provider, business }: Pro
         setSelected(new Set());
         setTitle("");
         setMessage("");
+        setActiveTemplateId(null);
       }
       router.refresh();
     });
@@ -242,6 +295,17 @@ export function WaPromoClient({ recipients, campaigns, provider, business }: Pro
             <MessageCircle size={15} style={{ color: "#1a7fba" }} />
             <span style={{ fontSize: "13px", fontWeight: 800, color: "#0f172a" }}>Compose promo</span>
           </div>
+
+          <TemplatePanel
+            templates={templates}
+            activeId={activeTemplateId}
+            canSave={message.trim().length > 0}
+            suggestedName={templates.find((t) => t.id === activeTemplateId)?.name ?? title.trim()}
+            busy={isPending || savingTemplate}
+            onUse={useTemplate}
+            onSave={saveTemplate}
+            onDelete={setRemoving}
+          />
 
           <div>
             <label style={lbl}>Campaign title (optional — for your history)</label>
@@ -489,6 +553,27 @@ export function WaPromoClient({ recipients, campaigns, provider, business }: Pro
         </Modal>
       )}
 
+      {/* ══ Template dialogs ══ */}
+      {replacing && (
+        <ConfirmDialog
+          title={`Load “${replacing.name}”?`}
+          body="This replaces the message you've written. Save it as a template first if you want to keep it."
+          confirmLabel="Replace message"
+          onCancel={() => setReplacing(null)}
+          onConfirm={() => { applyTemplate(replacing); setReplacing(null); }}
+        />
+      )}
+      {removing && (
+        <ConfirmDialog
+          title={`Delete “${removing.name}”?`}
+          body="The template is removed for good. Blasts you already sent keep their message in the history."
+          confirmLabel="Delete"
+          danger
+          onCancel={() => setRemoving(null)}
+          onConfirm={() => removeTemplate(removing)}
+        />
+      )}
+
       {/* ══ Manual result modal ══ */}
       {manualResult?.links && (
         <ManualResult
@@ -501,11 +586,179 @@ export function WaPromoClient({ recipients, campaigns, provider, business }: Pro
             setSelected(new Set());
             setTitle("");
             setMessage("");
+            setActiveTemplateId(null);
             router.refresh();
           }}
         />
       )}
     </div>
+  );
+}
+
+// ─── Saved templates ─────────────────────────────────────────────────────────
+
+function TemplatePanel({
+  templates, activeId, canSave, suggestedName, busy, onUse, onSave, onDelete,
+}: {
+  templates:     PromoTemplateRow[];
+  activeId:      number | null;
+  /** There's a message to save. */
+  canSave:       boolean;
+  /** Pre-fills the name field: the loaded template, else the campaign title. */
+  suggestedName: string;
+  busy:          boolean;
+  onUse:         (t: PromoTemplateRow) => void;
+  onSave:        (name: string) => Promise<boolean>;
+  onDelete:      (t: PromoTemplateRow) => void;
+}) {
+  const [naming, setNaming] = useState(false);
+  const [name, setName]     = useState("");
+
+  const trimmed  = name.trim().replace(/\s+/g, " ");
+  const existing = templates.find((t) => t.name.toLowerCase() === trimmed.toLowerCase());
+
+  const open = () => { setName(suggestedName); setNaming(true); };
+  const submit = async () => {
+    if (!trimmed || busy) return;
+    if (await onSave(trimmed)) setNaming(false);
+  };
+
+  return (
+    <div style={{ border: "1.5px solid #e2e8f0", borderRadius: "10px", background: "#f8fafc" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", padding: "9px 12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "7px", minWidth: 0 }}>
+          <Bookmark size={13} style={{ color: "#1a7fba", flexShrink: 0 }} />
+          <span style={{ fontSize: "12px", fontWeight: 800, color: "#0f172a" }}>Templates</span>
+          <span style={{ fontSize: "10px", fontWeight: 700, color: "#64748b", background: "white",
+            border: "1px solid #e2e8f0", padding: "1px 7px", borderRadius: "999px" }}>
+            {templates.length}
+          </span>
+        </div>
+        {!naming && (
+          <button
+            type="button" onClick={open} disabled={!canSave || busy}
+            title={canSave ? "Save the current message as a template" : "Write a message first"}
+            style={{ ...ghostBtn, height: 30, padding: "0 10px", fontSize: "11px",
+              opacity: canSave ? 1 : 0.5, cursor: canSave && !busy ? "pointer" : "not-allowed" }}
+          >
+            <BookmarkPlus size={12} /> Save as template
+          </button>
+        )}
+      </div>
+
+      {naming && (
+        <div style={{ padding: "0 12px 10px" }}>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <input
+              autoFocus
+              style={{ ...inp, flex: 1, background: "white" }}
+              value={name}
+              maxLength={60}
+              placeholder="Template name, e.g. Ramadan 20% off"
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter")  { e.preventDefault(); void submit(); }
+                if (e.key === "Escape") setNaming(false);
+              }}
+            />
+            <button
+              type="button" onClick={() => void submit()} disabled={!trimmed || busy}
+              style={{ ...ghostBtn, borderColor: "#1a7fba", background: "#1a7fba", color: "white",
+                opacity: !trimmed || busy ? 0.5 : 1, cursor: !trimmed || busy ? "not-allowed" : "pointer" }}
+            >
+              {busy ? <Loader2 size={12} className="animate-spin" /> : null}
+              {existing ? "Replace" : "Save"}
+            </button>
+            <button type="button" onClick={() => setNaming(false)} disabled={busy} style={ghostBtn}>Cancel</button>
+          </div>
+          {existing && (
+            <p style={{ fontSize: "10.5px", color: "#b45309", marginTop: 6 }}>
+              A template named “{existing.name}” already exists — saving replaces its message.
+            </p>
+          )}
+        </div>
+      )}
+
+      {templates.length === 0 ? (
+        <p style={{ padding: "0 12px 11px", fontSize: "11px", color: "#94a3b8", lineHeight: 1.5 }}>
+          No saved templates yet. Write a message, then press <strong>Save as template</strong> to reuse it later.
+        </p>
+      ) : (
+        <div style={{ maxHeight: 168, overflowY: "auto", borderTop: "1px solid #e2e8f0", background: "white",
+          borderRadius: "0 0 9px 9px" }}>
+          {templates.map((t, i) => {
+            const active = t.id === activeId;
+            return (
+              <div key={t.id} style={{
+                display: "flex", alignItems: "center",
+                borderBottom: i < templates.length - 1 ? "1px solid #f1f5f9" : "none",
+                background: active ? "#edf7fd" : "white",
+              }}>
+                <button
+                  type="button" onClick={() => onUse(t)} disabled={busy}
+                  title="Use this template"
+                  style={{ flex: 1, minWidth: 0, textAlign: "left", padding: "8px 12px", border: "none",
+                    background: "transparent", cursor: busy ? "not-allowed" : "pointer" }}
+                >
+                  <span style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "12px", fontWeight: 700, color: "#1e293b",
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
+                    {active && (
+                      <span style={{ fontSize: "9px", fontWeight: 800, color: "#0f5a85", background: "white",
+                        border: "1px solid #b6def5", padding: "0 5px", borderRadius: "4px", flexShrink: 0 }}>
+                        LOADED
+                      </span>
+                    )}
+                  </span>
+                  <span style={{ display: "block", fontSize: "10.5px", color: "#94a3b8", marginTop: 1,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {t.message.replace(/\s+/g, " ")}
+                  </span>
+                </button>
+                <button
+                  type="button" onClick={() => onDelete(t)} disabled={busy}
+                  aria-label={`Delete template ${t.name}`} title="Delete template"
+                  style={{ width: 30, height: 30, margin: "0 6px", flexShrink: 0, display: "flex",
+                    alignItems: "center", justifyContent: "center", borderRadius: "6px", border: "none",
+                    background: "transparent", cursor: busy ? "not-allowed" : "pointer", color: "#94a3b8" }}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConfirmDialog({ title, body, confirmLabel, danger, onConfirm, onCancel }: {
+  title:        string;
+  body:         string;
+  confirmLabel: string;
+  danger?:      boolean;
+  onConfirm:    () => void;
+  onCancel:     () => void;
+}) {
+  return (
+    <Modal onClose={onCancel}>
+      <div style={{ padding: "22px" }}>
+        <AlertTriangle size={26} style={{ color: danger ? "#dc2626" : "#d97706" }} />
+        <p style={{ fontSize: "16px", fontWeight: 800, color: "#0f172a", marginTop: "10px" }}>{title}</p>
+        <p style={{ fontSize: "13px", color: "#64748b", marginTop: "6px", lineHeight: 1.5 }}>{body}</p>
+        <div style={{ display: "flex", gap: "10px", marginTop: "18px" }}>
+          <button style={{ ...ghostBtn, flex: 1, height: 42 }} onClick={onCancel}>Cancel</button>
+          <button
+            style={{ ...primaryBtn, flex: 1,
+              ...(danger ? { background: "linear-gradient(135deg,#be123c,#f43f5e 55%,#9f1239)", boxShadow: "0 4px 14px rgba(225,29,72,0.3)" } : {}) }}
+            onClick={onConfirm}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

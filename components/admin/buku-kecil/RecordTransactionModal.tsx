@@ -10,6 +10,7 @@ import Link from "next/link";
 import { ArrowDownCircle, ArrowUpCircle, Loader2, X } from "lucide-react";
 import { recordManualTransaction } from "@/lib/actions/payments";
 import { formatUSD } from "@/lib/utils/order-form";
+import { formatDayLabelBiz, isoDayBiz } from "@/lib/utils/business-time";
 import type { ExpenseCategory } from "@/lib/db/schema";
 
 const field =
@@ -27,6 +28,9 @@ export function RecordTransactionModal({ categories, balance, onClose, onRecorde
   const [amount, setAmount] = useState("");
   const [desc,   setDesc]   = useState("");
   const [catId,  setCatId]  = useState<number | null>(null);
+  // Day the money moved — today unless the entry is being logged late.
+  const [today]             = useState(() => isoDayBiz(new Date()));
+  const [date,   setDate]   = useState(today);
   const [error,  setError]  = useState<string | null>(null);
   const [done,   setDone]   = useState<string | null>(null);
   const [pending, start]    = useTransition();
@@ -41,11 +45,13 @@ export function RecordTransactionModal({ categories, balance, onClose, onRecorde
     if (isNaN(amt) || amt <= 0) { setError("Enter an amount greater than zero."); return; }
     if (!desc.trim())           { setError("Add a description."); return; }
     if (!catId)                 { setError("Select a category."); return; }
+    if (!date)                  { setError("Pick the date."); return; }
+    if (date > today)           { setError("The date can't be in the future."); return; }
     setError(null);
     start(async () => {
-      const res = await recordManualTransaction({ direction: dir, amount: amt, description: desc.trim(), categoryId: catId });
+      const res = await recordManualTransaction({ direction: dir, amount: amt, description: desc.trim(), categoryId: catId, date });
       if (res.success) {
-        setDone(`Recorded. New balance ${formatUSD(res.newBalance ?? balance)}.`);
+        setDone(`Recorded${date === today ? "" : ` on ${formatDayLabelBiz(date)}`}. New balance ${formatUSD(res.newBalance ?? balance)}.`);
         setAmount(""); setDesc(""); setCatId(null);
         onRecorded();
       } else {
@@ -102,6 +108,16 @@ export function RecordTransactionModal({ categories, balance, onClose, onRecorde
           <div>
             <label className={label}>Amount</label>
             <input type="number" inputMode="decimal" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className={`${field} h-12 text-[18px] font-extrabold tabular-nums`} />
+          </div>
+
+          <div>
+            <label className={label}>{dir === "income" ? "Date received" : "Date spent"}</label>
+            <input type="date" value={date} max={today} onChange={(e) => { setDate(e.target.value); setDone(null); }} className={field} />
+            {date && date !== today && (
+              <p className="mt-1.5 text-xs font-semibold text-amber-600">
+                Booked on {formatDayLabelBiz(date)} — the balance from that day on will include it.
+              </p>
+            )}
           </div>
 
           <div>

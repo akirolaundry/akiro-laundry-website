@@ -8,17 +8,33 @@ import type { DateRange } from "react-day-picker";
 import {
   Banknote, ChevronLeft, ChevronRight, ArrowDownLeft, ArrowUpRight, Wallet,
   Loader2, AlertTriangle, CheckCircle2, Calculator, Inbox, Info, CalendarCheck,
+  ShoppingBag, HandCoins, Hourglass,
 } from "lucide-react";
 import { formatUSD } from "@/lib/utils/order-form";
 import { addDaysISO, formatBiz } from "@/lib/utils/business-time";
 import { SegmentedControl } from "@/components/admin/SegmentedControl";
 import { DateRangePicker } from "@/components/admin/DateRangePicker";
-import type { CashBook, CashBookDay, CashBookEntry } from "@/lib/actions/finance";
-import { cashBookHref, type CashBookPeriod } from "@/lib/utils/cash-book-period";
+import type {
+  CashBook, CashBookDay, CashBookEntry, OrderBook, OrderBookDay, OrderBookOrder,
+} from "@/lib/actions/finance";
+import { cashBookHref, type CashBookBasis, type CashBookPeriod } from "@/lib/utils/cash-book-period";
 
 interface Props {
-  period: CashBookPeriod;
-  book:   CashBook;
+  period:    CashBookPeriod;
+  /** Set when revenue is counted as cash in (`period.basis === "cash"`). */
+  book:      CashBook | null;
+  /** Set when revenue is counted by order date (`period.basis === "orders"`). */
+  orderBook: OrderBook | null;
+}
+
+/** What the two bodies share with the page frame. */
+interface ViewProps {
+  period:    CashBookPeriod;
+  /** "today" / "this week" / "on this day" … for sentences. */
+  phrase:    string;
+  multiDay:  boolean;
+  pending:   boolean;
+  onOpenDay: (day: string) => void;
 }
 
 // ─── Styles & helpers ─────────────────────────────────────────────────────────
@@ -76,15 +92,16 @@ function tally(entries: CashBookEntry[], pred: (e: CashBookEntry) => boolean) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-export function DailyCashClient({ period, book }: Props) {
+export function DailyCashClient({ period, book, orderBook }: Props) {
   const router = useRouter();
   const [pending, startNav] = useTransition();
   const go = (href: string) => startNav(() => router.push(href, { scroll: false }));
+  // Every link keeps the revenue basis that is switched on.
+  const link = (p: Omit<Parameters<typeof cashBookHref>[0], "basis">) =>
+    cashBookHref({ ...p, basis: period.basis });
 
   const multiDay = period.from !== period.to;
-  const income   = book.entries.filter((e) => e.direction === "income");
-  const outcome  = book.entries.filter((e) => e.direction === "outcome");
-  const net      = book.cashIn - book.cashOut;
+  const orderView = period.basis === "orders";
 
   const phrase =
     period.view === "daily"   ? (period.isCurrent ? "today"      : "on this day")
@@ -103,44 +120,48 @@ export function DailyCashClient({ period, book }: Props) {
   // a past one keeps its first day.
   const switchView = (v: "daily" | "weekly" | "monthly") => {
     if (v === period.view) return;
-    go(cashBookHref({ view: v, date: period.isCurrent ? undefined : period.from }));
+    go(link({ view: v, date: period.isCurrent ? undefined : period.from }));
   };
   const step = (anchor: string | null) => {
-    if (anchor && period.view !== "custom") go(cashBookHref({ view: period.view, date: anchor }));
+    if (anchor && period.view !== "custom") go(link({ view: period.view, date: anchor }));
   };
-  const openDay = (day: string) => go(cashBookHref({ view: "daily", date: day }));
-
-  // Breakdowns shown under the Cash in / Cash out totals. The first row always
-  // shows; the others only when there's something in them.
-  const otherIn   = tally(book.entries, (e) => e.direction === "income" && e.kind === "manual");
-  const adjIn     = tally(book.entries, (e) => e.direction === "income" && (e.kind === "adjustment" || e.kind === "opening"));
-  const expenses  = tally(book.entries, (e) => e.direction === "outcome" && e.kind === "manual");
-  const adjOut    = tally(book.entries, (e) => e.direction === "outcome" && e.kind === "adjustment");
-  const changeOut = tally(book.entries, (e) => e.direction === "outcome" && e.kind === "change");
-
-  const inRows = [
-    // Non-breaking spaces keep "(6 · 1 DP)" together when the card is narrow.
-    { label: `Payments (${book.paymentCount}${book.dpCount ? ` · ${book.dpCount} DP` : ""})`, value: book.orderIncome, always: true },
-    { label: `Other income (${otherIn.count})`, value: otherIn.total },
-    { label: "Adjustments", value: adjIn.total },
-  ].filter((r) => r.always || r.value > 0);
-  const outRows = [
-    { label: `Expenses (${expenses.count})`, value: expenses.total, always: true },
-    { label: "Adjustments", value: adjOut.total },
-    { label: `Change given (${changeOut.count})`, value: changeOut.total },
-  ].filter((r) => r.always || r.value > 0);
+  const openDay = (day: string) => go(link({ view: "daily", date: day }));
+  // Same period, other way of counting revenue.
+  const switchBasis = (basis: CashBookBasis) => {
+    if (basis === period.basis) return;
+    go(cashBookHref(period.view === "custom"
+      ? { view: "custom", from: period.from, to: period.to, basis }
+      : { view: period.view, date: period.isCurrent ? undefined : period.from, basis }));
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "22px" }}>
 
       {/* ── Header ── */}
-      <div>
-        <h1 style={{ fontFamily: "Sora,sans-serif", fontWeight: 800, fontSize: "26px", color: "#0f172a", letterSpacing: "-0.02em", marginBottom: "4px", display: "flex", alignItems: "center", gap: "10px" }}>
-          <Banknote size={24} style={{ color: "#1a7fba" }} /> Daily Cash
-        </h1>
-        <p style={{ fontSize: "13px", color: "#94a3b8" }}>
-          Every payment and expense that went through the cash register — count the drawer against it.
-        </p>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "16px", flexWrap: "wrap" }}>
+        <div>
+          <h1 style={{ fontFamily: "Sora,sans-serif", fontWeight: 800, fontSize: "26px", color: "#0f172a", letterSpacing: "-0.02em", marginBottom: "4px", display: "flex", alignItems: "center", gap: "10px" }}>
+            <Banknote size={24} style={{ color: "#1a7fba" }} /> Daily Cash
+          </h1>
+          <p style={{ fontSize: "13px", color: "#94a3b8" }}>
+            {orderView
+              ? "Every order placed in the period at its full price, whatever the payment method — and how much of it has been paid."
+              : "Every payment and expense that went through the cash register — count the drawer against it."}
+          </p>
+        </div>
+        <div>
+          <p style={{ fontSize: "9.5px", fontWeight: 800, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: "5px", textAlign: "right" }}>
+            Revenue by
+          </p>
+          <SegmentedControl
+            options={[
+              { value: "cash"   as const, label: "Cash in"    },
+              { value: "orders" as const, label: "Order date" },
+            ]}
+            value={period.basis}
+            onChange={switchBasis}
+          />
+        </div>
       </div>
 
       {/* ── Period toolbar ── */}
@@ -182,7 +203,7 @@ export function DailyCashClient({ period, book }: Props) {
           {!(period.view === "daily" && period.isCurrent) && (
             <button
               type="button"
-              onClick={() => go(cashBookHref({ view: "daily" }))}
+              onClick={() => go(link({ view: "daily" }))}
               style={{
                 display: "inline-flex", alignItems: "center", gap: "6px",
                 padding: "6px 11px", borderRadius: "9px", border: "1.5px solid #e2e8f0",
@@ -196,176 +217,450 @@ export function DailyCashClient({ period, book }: Props) {
           <PeriodPicker
             key={`${period.view}:${period.from}:${period.to}`}
             period={period}
-            onRange={(from, to) => go(cashBookHref({ view: "custom", from, to }))}
+            onRange={(from, to) => go(link({ view: "custom", from, to }))}
             onDay={openDay}
-            onClear={() => go(cashBookHref({ view: "daily" }))}
+            onClear={() => go(link({ view: "daily" }))}
           />
         </div>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "22px", opacity: pending ? 0.55 : 1, transition: "opacity 0.2s" }}>
-
-        {/* ── Opening + in − out = expected ── */}
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 26px minmax(0,1fr) 26px minmax(0,1fr) 26px minmax(0,1.3fr)", gap: "10px", alignItems: "stretch" }}>
-          <FlowCard
-            label="Opening balance"
-            value={formatUSD(book.openingBalance)}
-            note={multiDay
-              ? `Cash in the drawer when ${dayLabel(period.from)} began.`
-              : `Carried over from the close of ${dayLabel(addDaysISO(period.from, -1))}.`}
-            icon={Wallet}
-            tone={SLATE}
-          />
-          <Operator>+</Operator>
-          <FlowCard
-            label="Cash in"
-            value={formatUSD(book.cashIn)}
-            valueColor={GREEN.color}
-            rows={inRows}
-            icon={ArrowDownLeft}
-            tone={GREEN}
-          />
-          <Operator>−</Operator>
-          <FlowCard
-            label="Cash out"
-            value={formatUSD(book.cashOut)}
-            valueColor={ROSE.color}
-            rows={outRows}
-            icon={ArrowUpRight}
-            tone={ROSE}
-          />
-          <Operator>=</Operator>
-          <div style={{ borderRadius: "14px", background: "linear-gradient(135deg,#0c1e35 0%,#0f3460 60%,#1a5276 100%)", boxShadow: "0 12px 32px rgba(12,30,53,0.26)", padding: "16px 18px", display: "flex", flexDirection: "column" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "7px" }}>
-              <Banknote size={13} style={{ color: "rgba(255,255,255,0.55)" }} />
-              <p style={{ fontSize: "9.5px", fontWeight: 800, color: "rgba(255,255,255,0.55)", textTransform: "uppercase", letterSpacing: "0.12em" }}>
-                {period.isCurrent ? "Expected in drawer" : "Closing balance"}
-              </p>
-            </div>
-            <p style={{ ...num, fontWeight: 900, fontSize: "27px", color: "white", letterSpacing: "-0.03em", lineHeight: 1, marginTop: "12px" }}>
-              {formatUSD(book.closingBalance)}
-            </p>
-            <p style={{ fontSize: "10.5px", color: "rgba(255,255,255,0.55)", marginTop: "6px" }}>
-              Net <span style={{ ...num, fontWeight: 800, color: net >= 0 ? "#86efac" : "#fda4af" }}>{signed(net)}</span> {phrase}
-            </p>
-            {period.isCurrent && (
-              <CountCheck key={`${period.from}:${period.to}`} expected={book.closingBalance} />
-            )}
-          </div>
-        </div>
-
-        {book.drift !== 0 && (
-          <div style={{ display: "flex", gap: "10px", alignItems: "flex-start", padding: "12px 16px", borderRadius: "12px", background: "#fffbeb", border: "1.5px solid #fcd34d" }}>
-            <AlertTriangle size={16} style={{ color: "#d97706", flexShrink: 0, marginTop: "1px" }} />
-            <p style={{ fontSize: "12px", color: "#92400e", lineHeight: 1.55 }}>
-              The register recorded <strong>{formatUSD(book.closingBalance + book.drift)}</strong> at the end of this period —{" "}
-              <strong>{formatUSD(Math.abs(book.drift))} {book.drift > 0 ? "more" : "less"}</strong> than the entries below add up to.
-              Some cash moved without a matching entry; check the Cash Register history before closing the count.
-            </p>
-          </div>
-        )}
-
-        {/* ── Day by day (multi-day periods) ── */}
-        {multiDay && <DayTable days={book.days} book={book} onOpenDay={openDay} />}
-
-        {/* ── Income | Outcome ── */}
-        {/* Side by side when there's room (wide screens), stacked otherwise. */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "18px", alignItems: "flex-start" }}>
-          <section style={{ ...card, flex: "1.5 1 600px", minWidth: 0, overflow: "hidden" }}>
-            <TableTitle
-              icon={ArrowDownLeft} tone={GREEN} title="Income"
-              sub={`Cash received ${phrase} · ${plural(income.length, "entry", "entries")}`}
-              total={book.cashIn ? `+${formatUSD(book.cashIn)}` : formatUSD(0)}
-            />
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", minWidth: "480px", borderCollapse: "collapse", tableLayout: "fixed" }}>
-                <colgroup>
-                  <col style={{ width: multiDay ? "92px" : "70px" }} />
-                  <col />
-                  <col style={{ width: "132px" }} />
-                  <col style={{ width: "124px" }} />
-                </colgroup>
-                <thead>
-                  <tr>
-                    <th style={th}>Time</th>
-                    <th style={th}>Customer · Order</th>
-                    <th style={th}>Type</th>
-                    <th style={{ ...th, textAlign: "right" }}>Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {income.length === 0 ? (
-                    <EmptyRow colSpan={4} text={`No cash came in ${phrase}.`} />
-                  ) : income.map((e) => (
-                    <IncomeRow key={e.id} e={e} multiDay={multiDay} />
-                  ))}
-                </tbody>
-                {income.length > 0 && (
-                  <tfoot>
-                    <tr style={{ background: "#f8fafc" }}>
-                      <td colSpan={3} style={{ ...td, borderBottom: "none", fontSize: "10.5px", fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                        Total income
-                      </td>
-                      <td style={{ ...td, ...num, borderBottom: "none", textAlign: "right", fontSize: "13px", fontWeight: 800, color: GREEN.color }}>
-                        +{formatUSD(book.cashIn)}
-                      </td>
-                    </tr>
-                  </tfoot>
-                )}
-              </table>
-            </div>
-          </section>
-
-          <section style={{ ...card, flex: "1 1 380px", minWidth: 0, overflow: "hidden" }}>
-            <TableTitle
-              icon={ArrowUpRight} tone={ROSE} title="Outcome"
-              sub={`Cash paid out ${phrase} · ${plural(outcome.length, "entry", "entries")}`}
-              total={book.cashOut ? `−${formatUSD(book.cashOut)}` : formatUSD(0)}
-            />
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", minWidth: "320px", borderCollapse: "collapse", tableLayout: "fixed" }}>
-                <colgroup>
-                  <col style={{ width: multiDay ? "92px" : "70px" }} />
-                  <col />
-                  <col style={{ width: "108px" }} />
-                </colgroup>
-                <thead>
-                  <tr>
-                    <th style={th}>Time</th>
-                    <th style={th}>Description · Category</th>
-                    <th style={{ ...th, textAlign: "right" }}>Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {outcome.length === 0 ? (
-                    <EmptyRow colSpan={3} text={`Nothing was paid out ${phrase}.`} />
-                  ) : outcome.map((e) => (
-                    <OutcomeRow key={e.id} e={e} multiDay={multiDay} />
-                  ))}
-                </tbody>
-                {outcome.length > 0 && (
-                  <tfoot>
-                    <tr style={{ background: "#f8fafc" }}>
-                      <td colSpan={2} style={{ ...td, borderBottom: "none", fontSize: "10.5px", fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                        Total outcome
-                      </td>
-                      <td style={{ ...td, ...num, borderBottom: "none", textAlign: "right", fontSize: "13px", fontWeight: 800, color: ROSE.color }}>
-                        −{formatUSD(book.cashOut)}
-                      </td>
-                    </tr>
-                  </tfoot>
-                )}
-              </table>
-            </div>
-          </section>
-        </div>
-
-        <p style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#94a3b8" }}>
-          <Info size={12} /> Only cash goes through the drawer — transfer and QRIS payments are not listed here.
-          Cash sales are shown net of the change handed back.
-        </p>
-      </div>
+      {book && (
+        <CashView period={period} book={book} phrase={phrase} multiDay={multiDay} pending={pending} onOpenDay={openDay} />
+      )}
+      {orderBook && (
+        <OrdersView period={period} orderBook={orderBook} phrase={phrase} multiDay={multiDay} pending={pending} onOpenDay={openDay} />
+      )}
     </div>
+  );
+}
+
+// ─── Cash-in view (the drawer count) ──────────────────────────────────────────
+
+function CashView({ period, book, phrase, multiDay, pending, onOpenDay: openDay }: ViewProps & { book: CashBook }) {
+  const income  = book.entries.filter((e) => e.direction === "income");
+  const outcome = book.entries.filter((e) => e.direction === "outcome");
+  const net     = book.cashIn - book.cashOut;
+
+  // Breakdowns shown under the Cash in / Cash out totals. The first row always
+  // shows; the others only when there's something in them.
+  const otherIn   = tally(book.entries, (e) => e.direction === "income" && e.kind === "manual");
+  const adjIn     = tally(book.entries, (e) => e.direction === "income" && (e.kind === "adjustment" || e.kind === "opening"));
+  const expenses  = tally(book.entries, (e) => e.direction === "outcome" && e.kind === "manual");
+  const adjOut    = tally(book.entries, (e) => e.direction === "outcome" && e.kind === "adjustment");
+  const changeOut = tally(book.entries, (e) => e.direction === "outcome" && e.kind === "change");
+
+  const inRows = [
+    // Non-breaking spaces keep "(6 · 1 DP)" together when the card is narrow.
+    { label: `Payments (${book.paymentCount}${book.dpCount ? ` · ${book.dpCount} DP` : ""})`, value: book.orderIncome, always: true },
+    { label: `Other income (${otherIn.count})`, value: otherIn.total },
+    { label: "Adjustments", value: adjIn.total },
+  ].filter((r) => r.always || r.value > 0);
+  const outRows = [
+    { label: `Expenses (${expenses.count})`, value: expenses.total, always: true },
+    { label: "Adjustments", value: adjOut.total },
+    { label: `Change given (${changeOut.count})`, value: changeOut.total },
+  ].filter((r) => r.always || r.value > 0);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "22px", opacity: pending ? 0.55 : 1, transition: "opacity 0.2s" }}>
+
+      {/* ── Opening + in − out = expected ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 26px minmax(0,1fr) 26px minmax(0,1fr) 26px minmax(0,1.3fr)", gap: "10px", alignItems: "stretch" }}>
+        <FlowCard
+          label="Opening balance"
+          value={formatUSD(book.openingBalance)}
+          note={multiDay
+            ? `Cash in the drawer when ${dayLabel(period.from)} began.`
+            : `Carried over from the close of ${dayLabel(addDaysISO(period.from, -1))}.`}
+          icon={Wallet}
+          tone={SLATE}
+        />
+        <Operator>+</Operator>
+        <FlowCard
+          label="Cash in"
+          value={formatUSD(book.cashIn)}
+          valueColor={GREEN.color}
+          rows={inRows}
+          icon={ArrowDownLeft}
+          tone={GREEN}
+        />
+        <Operator>−</Operator>
+        <FlowCard
+          label="Cash out"
+          value={formatUSD(book.cashOut)}
+          valueColor={ROSE.color}
+          rows={outRows}
+          icon={ArrowUpRight}
+          tone={ROSE}
+        />
+        <Operator>=</Operator>
+        <div style={{ borderRadius: "14px", background: "linear-gradient(135deg,#0c1e35 0%,#0f3460 60%,#1a5276 100%)", boxShadow: "0 12px 32px rgba(12,30,53,0.26)", padding: "16px 18px", display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "7px" }}>
+            <Banknote size={13} style={{ color: "rgba(255,255,255,0.55)" }} />
+            <p style={{ fontSize: "9.5px", fontWeight: 800, color: "rgba(255,255,255,0.55)", textTransform: "uppercase", letterSpacing: "0.12em" }}>
+              {period.isCurrent ? "Expected in drawer" : "Closing balance"}
+            </p>
+          </div>
+          <p style={{ ...num, fontWeight: 900, fontSize: "27px", color: "white", letterSpacing: "-0.03em", lineHeight: 1, marginTop: "12px" }}>
+            {formatUSD(book.closingBalance)}
+          </p>
+          <p style={{ fontSize: "10.5px", color: "rgba(255,255,255,0.55)", marginTop: "6px" }}>
+            Net <span style={{ ...num, fontWeight: 800, color: net >= 0 ? "#86efac" : "#fda4af" }}>{signed(net)}</span> {phrase}
+          </p>
+          {period.isCurrent && (
+            <CountCheck key={`${period.from}:${period.to}`} expected={book.closingBalance} />
+          )}
+        </div>
+      </div>
+
+      {book.drift !== 0 && (
+        <div style={{ display: "flex", gap: "10px", alignItems: "flex-start", padding: "12px 16px", borderRadius: "12px", background: "#fffbeb", border: "1.5px solid #fcd34d" }}>
+          <AlertTriangle size={16} style={{ color: "#d97706", flexShrink: 0, marginTop: "1px" }} />
+          <p style={{ fontSize: "12px", color: "#92400e", lineHeight: 1.55 }}>
+            The register recorded <strong>{formatUSD(book.closingBalance + book.drift)}</strong> at the end of this period —{" "}
+            <strong>{formatUSD(Math.abs(book.drift))} {book.drift > 0 ? "more" : "less"}</strong> than the entries below add up to.
+            Some cash moved without a matching entry; check the Cash Register history before closing the count.
+          </p>
+        </div>
+      )}
+
+      {/* ── Day by day (multi-day periods) ── */}
+      {multiDay && <DayTable days={book.days} book={book} onOpenDay={openDay} />}
+
+      {/* ── Income | Outcome ── */}
+      {/* Side by side when there's room (wide screens), stacked otherwise. */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "18px", alignItems: "flex-start" }}>
+        <section style={{ ...card, flex: "1.5 1 600px", minWidth: 0, overflow: "hidden" }}>
+          <TableTitle
+            icon={ArrowDownLeft} tone={GREEN} title="Income"
+            sub={`Cash received ${phrase} · ${plural(income.length, "entry", "entries")}`}
+            total={book.cashIn ? `+${formatUSD(book.cashIn)}` : formatUSD(0)}
+          />
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: "480px", borderCollapse: "collapse", tableLayout: "fixed" }}>
+              <colgroup>
+                <col style={{ width: multiDay ? "92px" : "70px" }} />
+                <col />
+                <col style={{ width: "132px" }} />
+                <col style={{ width: "124px" }} />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th style={th}>Time</th>
+                  <th style={th}>Customer · Order</th>
+                  <th style={th}>Type</th>
+                  <th style={{ ...th, textAlign: "right" }}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {income.length === 0 ? (
+                  <EmptyRow colSpan={4} text={`No cash came in ${phrase}.`} />
+                ) : income.map((e) => (
+                  <IncomeRow key={e.id} e={e} multiDay={multiDay} />
+                ))}
+              </tbody>
+              {income.length > 0 && (
+                <tfoot>
+                  <tr style={{ background: "#f8fafc" }}>
+                    <td colSpan={3} style={{ ...td, borderBottom: "none", fontSize: "10.5px", fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                      Total income
+                    </td>
+                    <td style={{ ...td, ...num, borderBottom: "none", textAlign: "right", fontSize: "13px", fontWeight: 800, color: GREEN.color }}>
+                      +{formatUSD(book.cashIn)}
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </section>
+
+        <section style={{ ...card, flex: "1 1 380px", minWidth: 0, overflow: "hidden" }}>
+          <TableTitle
+            icon={ArrowUpRight} tone={ROSE} title="Outcome"
+            sub={`Cash paid out ${phrase} · ${plural(outcome.length, "entry", "entries")}`}
+            total={book.cashOut ? `−${formatUSD(book.cashOut)}` : formatUSD(0)}
+          />
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: "320px", borderCollapse: "collapse", tableLayout: "fixed" }}>
+              <colgroup>
+                <col style={{ width: multiDay ? "92px" : "70px" }} />
+                <col />
+                <col style={{ width: "108px" }} />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th style={th}>Time</th>
+                  <th style={th}>Description · Category</th>
+                  <th style={{ ...th, textAlign: "right" }}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {outcome.length === 0 ? (
+                  <EmptyRow colSpan={3} text={`Nothing was paid out ${phrase}.`} />
+                ) : outcome.map((e) => (
+                  <OutcomeRow key={e.id} e={e} multiDay={multiDay} />
+                ))}
+              </tbody>
+              {outcome.length > 0 && (
+                <tfoot>
+                  <tr style={{ background: "#f8fafc" }}>
+                    <td colSpan={2} style={{ ...td, borderBottom: "none", fontSize: "10.5px", fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                      Total outcome
+                    </td>
+                    <td style={{ ...td, ...num, borderBottom: "none", textAlign: "right", fontSize: "13px", fontWeight: 800, color: ROSE.color }}>
+                      −{formatUSD(book.cashOut)}
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <p style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "#94a3b8" }}>
+        <Info size={12} style={{ flexShrink: 0 }} /> Only cash goes through the drawer — transfer and QRIS payments are not listed here.
+        Cash sales are shown net of the change handed back. Switch “Revenue by” to Order date to see every order.
+      </p>
+    </div>
+  );
+}
+
+// ─── Order-date view (revenue by the day the order was placed) ────────────────
+
+const AMBER = { color: "#b45309", bg: "linear-gradient(135deg,#fffbeb,#fef3c7)", border: "#fcd34d" };
+const BLUE  = { color: "#1a7fba", bg: "linear-gradient(135deg,#edf7fd,#c8e9f8)", border: "#b6def5" };
+
+const METHOD_LABEL: Record<string, string> = { cash: "Cash", transfer: "Transfer", qris: "QRIS", other: "Other" };
+
+function OrdersView({ phrase, multiDay, pending, onOpenDay, orderBook: b }: ViewProps & { orderBook: OrderBook }) {
+  const collectedRows = b.byMethod.length > 0
+    ? b.byMethod.map((m) => ({ label: `${METHOD_LABEL[m.method]} (${m.count})`, value: m.amount }))
+    : [{ label: "Nothing collected yet", value: 0 }];
+  const owedRows = [
+    { label: `Unpaid (${b.unpaidCount})`, value: b.unpaidDue, always: true },
+    { label: `Balance on DP (${b.partialCount})`, value: b.partialDue },
+  ].filter((r) => r.always || r.value > 0);
+  const pct = b.value > 0 ? Math.round((b.collected / b.value) * 100) : 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "22px", opacity: pending ? 0.55 : 1, transition: "opacity 0.2s" }}>
+
+      {/* ── Collected + outstanding = order value ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 26px minmax(0,1fr) 26px minmax(0,1.3fr)", gap: "10px", alignItems: "stretch" }}>
+        <FlowCard
+          label="Collected"
+          value={formatUSD(b.collected)}
+          valueColor={GREEN.color}
+          rows={collectedRows}
+          icon={HandCoins}
+          tone={GREEN}
+        />
+        <Operator>+</Operator>
+        <FlowCard
+          label="Still owed"
+          value={formatUSD(b.outstanding)}
+          valueColor={AMBER.color}
+          rows={owedRows}
+          icon={Hourglass}
+          tone={AMBER}
+        />
+        <Operator>=</Operator>
+        <div style={{ borderRadius: "14px", background: "linear-gradient(135deg,#0c1e35 0%,#0f3460 60%,#1a5276 100%)", boxShadow: "0 12px 32px rgba(12,30,53,0.26)", padding: "16px 18px", display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "7px" }}>
+            <ShoppingBag size={13} style={{ color: "rgba(255,255,255,0.55)" }} />
+            <p style={{ fontSize: "9.5px", fontWeight: 800, color: "rgba(255,255,255,0.55)", textTransform: "uppercase", letterSpacing: "0.12em" }}>
+              Order value
+            </p>
+          </div>
+          <p style={{ ...num, fontWeight: 900, fontSize: "27px", color: "white", letterSpacing: "-0.03em", lineHeight: 1, marginTop: "12px" }}>
+            {formatUSD(b.value)}
+          </p>
+          <p style={{ fontSize: "10.5px", color: "rgba(255,255,255,0.55)", marginTop: "6px" }}>
+            {plural(b.orderCount, "order")} placed {phrase}
+          </p>
+          <div style={{ marginTop: "auto", paddingTop: "14px" }}>
+            <div style={{ height: 6, borderRadius: 999, background: "rgba(255,255,255,0.14)", overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${pct}%`, background: "linear-gradient(90deg,#4ade80,#16a34a)", transition: "width 0.2s" }} />
+            </div>
+            <p style={{ fontSize: "10.5px", color: "rgba(255,255,255,0.55)", marginTop: "6px" }}>
+              <span style={{ ...num, fontWeight: 800, color: "#86efac" }}>{pct}%</span> collected so far
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Day by day (multi-day periods) ── */}
+      {multiDay && <OrderDayTable days={b.days} book={b} onOpenDay={onOpenDay} />}
+
+      {/* ── Orders ── */}
+      <section style={{ ...card, overflow: "hidden" }}>
+        <TableTitle
+          icon={ShoppingBag} tone={BLUE} title="Orders"
+          sub={`Placed ${phrase} · ${plural(b.orderCount, "order")}`}
+          total={formatUSD(b.value)}
+        />
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", minWidth: "760px", borderCollapse: "collapse", tableLayout: "fixed" }}>
+            <colgroup>
+              <col style={{ width: multiDay ? "92px" : "70px" }} />
+              <col />
+              <col style={{ width: "150px" }} />
+              <col style={{ width: "104px" }} />
+              <col style={{ width: "104px" }} />
+              <col style={{ width: "104px" }} />
+            </colgroup>
+            <thead>
+              <tr>
+                <th style={th}>Time</th>
+                <th style={th}>Customer · Order</th>
+                <th style={th}>Payment</th>
+                <th style={{ ...th, textAlign: "right" }}>Total</th>
+                <th style={{ ...th, textAlign: "right" }}>Collected</th>
+                <th style={{ ...th, textAlign: "right" }}>Still owed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {b.orders.length === 0 ? (
+                <EmptyRow colSpan={6} text={`No orders were placed ${phrase}.`} />
+              ) : b.orders.map((o) => (
+                <OrderRow key={o.id} o={o} multiDay={multiDay} />
+              ))}
+            </tbody>
+            {b.orders.length > 0 && (
+              <tfoot>
+                <tr style={{ background: "#f8fafc" }}>
+                  <td colSpan={3} style={{ ...td, borderBottom: "none", fontSize: "10.5px", fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Total
+                  </td>
+                  <td style={{ ...td, ...num, borderBottom: "none", textAlign: "right", fontSize: "13px", fontWeight: 800 }}>{formatUSD(b.value)}</td>
+                  <td style={{ ...td, ...num, borderBottom: "none", textAlign: "right", fontSize: "13px", fontWeight: 800, color: GREEN.color }}>{formatUSD(b.collected)}</td>
+                  <td style={{ ...td, ...num, borderBottom: "none", textAlign: "right", fontSize: "13px", fontWeight: 800, color: b.outstanding ? AMBER.color : "#cbd5e1" }}>
+                    {b.outstanding ? formatUSD(b.outstanding) : "—"}
+                  </td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </section>
+
+      <p style={{ display: "flex", alignItems: "flex-start", gap: "6px", fontSize: "11px", color: "#94a3b8", lineHeight: 1.5 }}>
+        <Info size={12} style={{ flexShrink: 0, marginTop: "2px" }} />
+        <span>
+          Orders are counted on the day they were placed, at their full price, whatever the payment method.
+          “Collected” is what has been received against them so far — on any day — and the method shown is the one
+          used for the latest payment. Switch “Revenue by” to Cash in for the drawer count.
+        </span>
+      </p>
+    </div>
+  );
+}
+
+function OrderDayTable({ days, book, onOpenDay }: {
+  days: OrderBookDay[]; book: OrderBook; onOpenDay: (day: string) => void;
+}) {
+  return (
+    <section style={{ ...card, overflow: "hidden" }}>
+      <div style={{ padding: "14px 18px", borderBottom: "1px solid #f1f5f9", display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "12px" }}>
+        <div>
+          <p style={{ fontFamily: "Sora,sans-serif", fontWeight: 800, fontSize: "14px", color: "#0f172a" }}>Day by day</p>
+          <p style={{ fontSize: "10.5px", color: "#94a3b8", marginTop: "1px" }}>Click a day to see its orders</p>
+        </div>
+        <p style={{ fontSize: "11px", color: "#94a3b8" }}>{plural(days.length, "day")}</p>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={th}>Day</th>
+              <th style={{ ...th, textAlign: "right" }}>Orders</th>
+              <th style={{ ...th, textAlign: "right" }}>Order value</th>
+              <th style={{ ...th, textAlign: "right" }}>Collected</th>
+              <th style={{ ...th, textAlign: "right" }}>Still owed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {days.length === 0 ? (
+              <EmptyRow colSpan={5} text="No orders in this range." />
+            ) : days.map((d) => {
+              const quiet = d.orders === 0;
+              return (
+                <tr
+                  key={d.day}
+                  role="link"
+                  tabIndex={0}
+                  onClick={() => onOpenDay(d.day)}
+                  onKeyDown={(e) => { if (e.key === "Enter") onOpenDay(d.day); }}
+                  style={{ cursor: "pointer", transition: "background 0.1s" }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "#f4faff"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                >
+                  <td style={{ ...td, fontWeight: 700, color: quiet ? "#94a3b8" : "#0f172a", whiteSpace: "nowrap" }}>
+                    {dayLabel(d.day)}
+                    {quiet && <span style={{ marginLeft: "8px", fontSize: "10px", fontWeight: 600, color: "#cbd5e1" }}>no orders</span>}
+                  </td>
+                  <td style={{ ...td, ...num, textAlign: "right", color: quiet ? "#cbd5e1" : "#475569" }}>{quiet ? "—" : d.orders}</td>
+                  <td style={{ ...td, ...num, textAlign: "right", fontWeight: 800, color: quiet ? "#cbd5e1" : "#0f172a" }}>{quiet ? "—" : formatUSD(d.value)}</td>
+                  <td style={{ ...td, ...num, textAlign: "right", fontWeight: 700, color: d.collected ? GREEN.color : "#cbd5e1" }}>{d.collected ? formatUSD(d.collected) : "—"}</td>
+                  <td style={{ ...td, ...num, textAlign: "right", fontWeight: 700, color: d.outstanding ? AMBER.color : "#cbd5e1" }}>{d.outstanding ? formatUSD(d.outstanding) : "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          {days.length > 0 && (
+            <tfoot>
+              <tr style={{ background: "#f8fafc" }}>
+                <td style={{ ...td, borderBottom: "none", fontSize: "10.5px", fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.08em" }}>Total</td>
+                <td style={{ ...td, ...num, borderBottom: "none", textAlign: "right", fontWeight: 800 }}>{book.orderCount}</td>
+                <td style={{ ...td, ...num, borderBottom: "none", textAlign: "right", fontWeight: 800 }}>{formatUSD(book.value)}</td>
+                <td style={{ ...td, ...num, borderBottom: "none", textAlign: "right", fontWeight: 800, color: GREEN.color }}>{formatUSD(book.collected)}</td>
+                <td style={{ ...td, ...num, borderBottom: "none", textAlign: "right", fontWeight: 800, color: book.outstanding ? AMBER.color : "#cbd5e1" }}>{book.outstanding ? formatUSD(book.outstanding) : "—"}</td>
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function OrderRow({ o, multiDay }: { o: OrderBookOrder; multiDay: boolean }) {
+  const status =
+    o.paymentStatus === "paid"    ? { label: "Paid",   color: "#15803d", bg: "#f0fdf4", border: "#86efac", title: "Paid in full" }
+    : o.paymentStatus === "partial" ? { label: "DP",     color: "#b45309", bg: "#fffbeb", border: "#fcd34d", title: "Down payment — a balance is still owed" }
+    :                                 { label: "Unpaid", color: "#be123c", bg: "#fff1f2", border: "#fda4af", title: "Nothing paid yet" };
+  const chip: React.CSSProperties = {
+    display: "inline-block", maxWidth: "100%", padding: "1px 7px", borderRadius: "6px",
+    fontFamily: "ui-monospace,SFMono-Regular,Menlo,monospace", fontSize: "10.5px", fontWeight: 700,
+    textDecoration: "none", verticalAlign: "middle", color: "#0f5a85", background: "#edf7fd",
+    border: "1px solid #b6def5", ...ellipsis,
+  };
+  return (
+    <tr>
+      <td style={{ ...td, whiteSpace: "nowrap" }}>
+        {multiDay && <p style={{ fontSize: "10px", fontWeight: 600, color: "#94a3b8" }}>{dayLabel(o.day)}</p>}
+        <p style={{ ...num, fontSize: "12px", fontWeight: 700, color: "#475569" }}>{timeOf(o.createdAt)}</p>
+      </td>
+      <td style={td}>
+        <p title={o.customerName ?? undefined} style={{ ...ellipsis, fontWeight: 700, color: "#0f172a" }}>{o.customerName ?? "—"}</p>
+        <div style={{ marginTop: "3px", lineHeight: 1 }}>
+          <Link href={`/admin/orders/${o.id}`} title="Open order" style={chip}>{o.orderNumber}</Link>
+        </div>
+      </td>
+      <td style={td}>
+        <Badge {...status} />
+        {o.method && (
+          <p style={{ fontSize: "10.5px", color: "#94a3b8", marginTop: "3px", lineHeight: 1.35 }}>
+            {METHOD_LABEL[o.method]}{o.paidDay ? ` · paid ${dayLabel(o.paidDay)}` : ""}
+          </p>
+        )}
+      </td>
+      <td style={{ ...td, ...num, textAlign: "right", whiteSpace: "nowrap", fontSize: "13px", fontWeight: 800, color: "#0f172a" }}>{formatUSD(o.total)}</td>
+      <td style={{ ...td, ...num, textAlign: "right", whiteSpace: "nowrap", fontWeight: 700, color: o.collected ? GREEN.color : "#cbd5e1" }}>{o.collected ? formatUSD(o.collected) : "—"}</td>
+      <td style={{ ...td, ...num, textAlign: "right", whiteSpace: "nowrap", fontWeight: 700, color: o.outstanding ? AMBER.color : "#cbd5e1" }}>{o.outstanding ? formatUSD(o.outstanding) : "—"}</td>
+    </tr>
   );
 }
 

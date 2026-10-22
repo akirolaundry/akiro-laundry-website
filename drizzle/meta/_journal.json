@@ -50,6 +50,13 @@
       "when": 1791952275421,
       "tag": "0006_grey_skrulls",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792634053966,
+      "tag": "0007_sparkling_flatman",
+      "breakpoints": true
     }
   ]
 }

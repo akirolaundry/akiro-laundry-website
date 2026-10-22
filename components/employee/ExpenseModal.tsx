@@ -10,6 +10,7 @@ import { createPortal } from "react-dom";
 import { Check, Loader2, Receipt, Tags, X } from "lucide-react";
 import { recordEmployeeExpense } from "@/lib/actions/payments";
 import { formatUSD } from "@/lib/utils/order-form";
+import { addDaysISO, formatDayLabelBiz, isoDayBiz } from "@/lib/utils/business-time";
 import type { ExpenseCategory } from "@/lib/db/schema";
 
 interface Props {
@@ -24,6 +25,9 @@ export function ExpenseModal({ categories, balance, onClose, onSaved }: Props) {
   const [categoryId, setCategoryId] = useState<number | null>(null);
   const [amount,     setAmount]     = useState("");
   const [note,       setNote]       = useState("");
+  // The day the money was spent — today unless staff are logging it late.
+  const [today]                     = useState(() => isoDayBiz(new Date()));
+  const [date,       setDate]       = useState(today);
   const [error,      setError]      = useState<string | null>(null);
   const [pending,    start]         = useTransition();
 
@@ -35,12 +39,17 @@ export function ExpenseModal({ categories, balance, onClose, onSaved }: Props) {
   const submit = () => {
     if (!category) { setError("Pick what the money was spent on."); return; }
     if (!valid)    { setError("Enter an amount greater than zero."); return; }
+    if (!date)           { setError("Pick the date the money was spent."); return; }
+    if (date > today)    { setError("The date can't be in the future."); return; }
     if (value > balance) { setError(`Only ${formatUSD(balance)} is in the drawer.`); return; }
     setError(null);
     start(async () => {
-      const res = await recordEmployeeExpense({ categoryId: category.id, amount: value, note });
-      if (res.success) onSaved(`${formatUSD(value)} recorded for ${category.name}`);
-      else setError(res.error ?? "Could not record the expense.");
+      const res = await recordEmployeeExpense({ categoryId: category.id, amount: value, note, date });
+      if (res.success) {
+        onSaved(`${formatUSD(value)} recorded for ${category.name}${date === today ? "" : ` · ${formatDayLabelBiz(date)}`}`);
+      } else {
+        setError(res.error ?? "Could not record the expense.");
+      }
     });
   };
 
@@ -121,6 +130,34 @@ export function ExpenseModal({ categories, balance, onClose, onSaved }: Props) {
             {after !== null && (
               <p className={`mt-2 px-1 text-xs font-bold tabular-nums ${after < 0 ? "text-rose-600" : "text-slate-400"}`}>
                 {after < 0 ? "More than the drawer holds" : `Drawer after: ${formatUSD(after)}`}
+              </p>
+            )}
+          </div>
+
+          {/* Date */}
+          <div>
+            <label htmlFor="expense-date" className="mb-2 block text-[11px] font-black uppercase tracking-wider text-slate-400">Date spent</label>
+            <div className="flex gap-2">
+              <input
+                id="expense-date" type="date" value={date} max={today}
+                onChange={(e) => { setDate(e.target.value); setError(null); }}
+                className="h-12 min-w-0 flex-1 rounded-2xl bg-slate-50 px-4 text-[14px] font-semibold text-slate-800 outline-none ring-1 ring-slate-200 focus:ring-2 focus:ring-sky-300"
+              />
+              {([["Today", today], ["Yesterday", addDaysISO(today, -1)]] as const).map(([name, day]) => (
+                <button
+                  key={name} type="button" onClick={() => { setDate(day); setError(null); }}
+                  aria-pressed={date === day}
+                  className={`h-12 rounded-2xl px-3.5 text-[13px] font-bold ring-1 transition active:scale-95 ${
+                    date === day ? "bg-sky-50 text-sky-700 ring-sky-200" : "bg-white text-slate-500 ring-slate-200 hover:bg-slate-50"
+                  }`}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+            {date && date !== today && (
+              <p className="mt-2 px-1 text-xs font-semibold text-amber-600">
+                Logged on {formatDayLabelBiz(date)} — that day&apos;s cash totals will include it.
               </p>
             )}
           </div>
